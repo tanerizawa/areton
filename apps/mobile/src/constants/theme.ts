@@ -178,6 +178,10 @@ export const SERVICE_TYPES = [
   { value: 'BUSINESS_ASSISTANT', label: 'Business', icon: 'briefcase' },
 ] as const;
 
+export const SERVICE_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  SERVICE_TYPES.map((s) => [s.value, s.label]),
+);
+
 // ─── STATUS COLORS ────────────────────────────────────
 export const BOOKING_STATUS_COLORS: Record<string, string> = {
   PENDING: COLORS.warning,

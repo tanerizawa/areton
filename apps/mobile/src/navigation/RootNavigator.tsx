@@ -16,6 +16,8 @@ import { SOSScreen } from '../screens/common/SOSScreen';
 import { MapScreen } from '../screens/common/MapScreen';
 import { EditProfileScreen } from '../screens/common/EditProfileScreen';
 import { NotificationsScreen } from '../screens/common/NotificationsScreen';
+import { SecurityScreen } from '../screens/common/SecurityScreen';
+import { FavoritesScreen } from '../screens/client/FavoritesScreen';
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -24,12 +26,14 @@ export type RootStackParamList = {
   BookingCreate: { escortId: string; escortName: string; hourlyRate: number };
   BookingDetail: { bookingId: string };
   Chat: { bookingId: string; participantName: string; participantPhoto?: string; participantTier?: string };
-  Payment: { bookingId: string; amount: number };
+  Payment: { bookingId: string; amount: number; bookingStatus?: string };
   Review: { bookingId: string; revieweeName: string };
   SOS: { bookingId: string };
   Map: { bookingId?: string; lat?: number; lng?: number };
   EditProfile: undefined;
   Notifications: undefined;
+  Security: undefined;
+  Favorites: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -121,6 +125,16 @@ export function RootNavigator() {
               name="Notifications"
               component={NotificationsScreen}
               options={{ headerShown: true, headerTitle: 'Notifikasi', headerTintColor: COLORS.gold, headerStyle: { backgroundColor: COLORS.darkCard } }}
+            />
+            <Stack.Screen
+              name="Security"
+              component={SecurityScreen}
+              options={{ headerShown: true, headerTitle: 'Keamanan', headerTintColor: COLORS.gold, headerStyle: { backgroundColor: COLORS.darkCard } }}
+            />
+            <Stack.Screen
+              name="Favorites"
+              component={FavoritesScreen}
+              options={{ headerShown: true, headerTitle: 'Favorit', headerTintColor: COLORS.gold, headerStyle: { backgroundColor: COLORS.darkCard } }}
             />
           </>
         )}

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable } from 'react-native';
 import Animated, { FadeInDown, FadeIn, useSharedValue, useAnimatedStyle, withSpring, withTiming } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -9,7 +9,7 @@ import { RootStackParamList } from '../../navigation/RootNavigator';
 import { GradientButton } from '../../components/ui/GradientButton';
 import { AnimatedCounter } from '../../components/ui/AnimatedCounter';
 import { COLORS, SPACING, RADIUS, SHADOWS, GRADIENTS, ANIMATION } from '../../constants/theme';
-import { PaymentMethod } from '../../constants/types';
+import { PaymentMethod, BookingStatus } from '../../constants/types';
 import { useHaptic } from '../../hooks/useHaptic';
 import api from '../../lib/api';
 import Toast from 'react-native-toast-message';
@@ -53,13 +53,49 @@ function MethodItem({ m, selected, onPress, isLast }: { m: typeof METHODS[0]; se
 }
 
 export function PaymentScreen({ route, navigation }: Props) {
-  const { bookingId, amount } = route.params;
+  const { bookingId, amount, bookingStatus: initialStatus } = route.params;
   const [method, setMethod] = useState<PaymentMethod>('DOKU');
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [paySuccess, setPaySuccess] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [bookingStatus, setBookingStatus] = useState<BookingStatus>(
+    (initialStatus as BookingStatus) || 'PENDING',
+  );
   const { selection, success } = useHaptic();
+
+  const isConfirmed = bookingStatus === 'CONFIRMED';
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll booking status so the button enables as soon as escort confirms
+  const fetchStatus = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/bookings/${bookingId}`);
+      const status = data.data?.status as BookingStatus | undefined;
+      if (status) {
+        setBookingStatus(status);
+        // Stop polling once no longer PENDING
+        if (status !== 'PENDING' && intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }
+    } catch {
+      // silent — we still have the initial status
+    }
+  }, [bookingId]);
+
+  useEffect(() => {
+    // Fetch once immediately, then poll every 5 s while still PENDING
+    fetchStatus();
+    intervalRef.current = setInterval(fetchStatus, 5000);
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [fetchStatus]);
 
   const sections = useMemo(() => {
     const map = new Map<string, typeof METHODS>();
@@ -147,6 +183,35 @@ export function PaymentScreen({ route, navigation }: Props) {
         </LinearGradient>
       </Animated.View>
 
+      {/* Status Banner */}
+      {!isConfirmed && (
+        <Animated.View entering={FadeInDown.delay(150).duration(400)} style={styles.statusBanner}>
+          <View style={styles.statusBannerIcon}>
+            <Ionicons name="time-outline" size={20} color={COLORS.warning} />
+          </View>
+          <View style={styles.statusBannerContent}>
+            <Text style={styles.statusBannerTitle}>Menunggu Konfirmasi Escort</Text>
+            <Text style={styles.statusBannerDesc}>
+              Pembayaran dapat dilakukan setelah escort mengonfirmasi booking Anda. Anda akan mendapat notifikasi saat dikonfirmasi.
+            </Text>
+          </View>
+        </Animated.View>
+      )}
+
+      {isConfirmed && (
+        <Animated.View entering={FadeInDown.delay(150).duration(400)} style={styles.confirmedBanner}>
+          <View style={styles.confirmedBannerIcon}>
+            <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
+          </View>
+          <View style={styles.statusBannerContent}>
+            <Text style={styles.confirmedBannerTitle}>Booking Dikonfirmasi</Text>
+            <Text style={styles.confirmedBannerDesc}>
+              Escort telah mengonfirmasi. Silakan pilih metode pembayaran dan lanjutkan.
+            </Text>
+          </View>
+        </Animated.View>
+      )}
+
       {/* Method Sections with Collapsible */}
       {sections.map(([sectionName, items], si) => (
         <Animated.View key={sectionName} entering={FadeInDown.delay(200 + si * 100).duration(400)}>
@@ -173,7 +238,19 @@ export function PaymentScreen({ route, navigation }: Props) {
       ))}
 
       <Animated.View entering={FadeInDown.delay(500).duration(400)} style={{ marginTop: SPACING.lg }}>
-        <GradientButton title="Bayar Sekarang" onPress={handlePay} loading={loading} size="lg" />
+        <GradientButton
+          title={isConfirmed ? 'Bayar Sekarang' : 'Menunggu Konfirmasi...'}
+          onPress={handlePay}
+          loading={loading}
+          disabled={!isConfirmed}
+          size="lg"
+        />
+        {!isConfirmed && (
+          <Text style={styles.disabledHint}>
+            <Ionicons name="information-circle-outline" size={13} color={COLORS.textMuted} />
+            {' '}Tombol aktif setelah escort mengonfirmasi booking
+          </Text>
+        )}
       </Animated.View>
     </ScrollView>
   );
@@ -263,4 +340,74 @@ const styles = StyleSheet.create({
   },
   successTitle: { fontSize: 22, fontWeight: '800', color: COLORS.gold },
   successSub: { fontSize: 14, color: COLORS.textSecondary },
+  // Status banners
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: COLORS.warning + '10',
+    borderWidth: 1,
+    borderColor: COLORS.warning + '30',
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
+    gap: 12,
+  },
+  statusBannerIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.warning + '18',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  statusBannerContent: { flex: 1 },
+  statusBannerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.warning,
+    marginBottom: 4,
+  },
+  statusBannerDesc: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
+  confirmedBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: COLORS.success + '10',
+    borderWidth: 1,
+    borderColor: COLORS.success + '30',
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginBottom: SPACING.md,
+    gap: 12,
+  },
+  confirmedBannerIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.success + '18',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  confirmedBannerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.success,
+    marginBottom: 4,
+  },
+  confirmedBannerDesc: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
+  disabledHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 8,
+  },
 });

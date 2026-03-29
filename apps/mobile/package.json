@@ -8,6 +8,9 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "eslint . --ext .ts,.tsx",
+    "dev:device": "cd android && ./dev-run.sh",
+    "dev:device:clean": "cd android && ./dev-run.sh --clean",
+    "dev:device:relaunch": "cd android && ./dev-run.sh --no-build",
     "build:android": "eas build --platform android",
     "build:ios": "eas build --platform ios"
   },
@@ -25,6 +28,7 @@
     "dayjs": "^1.11.0",
     "expo": "~53.0.27",
     "expo-blur": "~14.1.5",
+    "expo-clipboard": "^55.0.9",
     "expo-constants": "~17.1.8",
     "expo-device": "~7.1.4",
     "expo-font": "~13.3.2",

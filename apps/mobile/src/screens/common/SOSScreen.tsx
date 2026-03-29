@@ -17,18 +17,6 @@ export function SOSScreen({ route, navigation }: Props) {
   const [countdown, setCountdown] = useState(5);
   const [confirmed, setConfirmed] = useState(false);
 
-  const triggerSOSRef = React.useRef(triggerSOS);
-  triggerSOSRef.current = triggerSOS;
-
-  useEffect(() => {
-    if (!confirmed) return;
-    if (countdown <= 0) {
-      triggerSOSRef.current();
-      return;
-    }
-    const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [countdown, confirmed]);
 
   const triggerSOS = async () => {
     setLoading(true);
@@ -55,6 +43,19 @@ export function SOSScreen({ route, navigation }: Props) {
       setLoading(false);
     }
   };
+
+  const triggerSOSRef = React.useRef(triggerSOS);
+  triggerSOSRef.current = triggerSOS;
+
+  useEffect(() => {
+    if (!confirmed) return;
+    if (countdown <= 0) {
+      triggerSOSRef.current();
+      return;
+    }
+    const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [countdown, confirmed]);
 
   if (sent) {
     return (

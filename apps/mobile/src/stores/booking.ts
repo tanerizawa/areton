@@ -7,6 +7,7 @@ interface BookingState {
   activeBookings: Booking[];
   loading: boolean;
   lastChecked: number;
+  lastError: string | null;
 
   checkActive: () => Promise<void>;
   clearActive: () => void;
@@ -17,6 +18,7 @@ export const useBookingStore = create<BookingState>((set, get) => ({
   activeBookings: [],
   loading: false,
   lastChecked: 0,
+  lastError: null,
 
   checkActive: async () => {
     const now = Date.now();
@@ -29,13 +31,15 @@ export const useBookingStore = create<BookingState>((set, get) => ({
         activeBookings: bookings,
         activeBooking: bookings[0] || null,
         lastChecked: now,
+        lastError: null,
       });
-    } catch {
-      // ignore polling errors
+    } catch (err: any) {
+      // Set lastChecked to prevent rapid retries on persistent errors
+      set({ lastChecked: now, lastError: err?.message || 'Unknown error' });
     } finally {
       set({ loading: false });
     }
   },
 
-  clearActive: () => set({ activeBooking: null, activeBookings: [], lastChecked: 0 }),
+  clearActive: () => set({ activeBooking: null, activeBookings: [], lastChecked: 0, lastError: null }),
 }));

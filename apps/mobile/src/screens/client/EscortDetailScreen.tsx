@@ -30,6 +30,7 @@ export function EscortDetailScreen({ route, navigation }: Props) {
   const [escort, setEscort] = useState<EscortProfile | null>(null);
   const [reviews, setReviews] = useState<Review[]>([]);
   const isOnline = usePresenceStore((s) => s.isOnline(escort?.userId || ''));
+  const checkOnline = usePresenceStore((s) => s.checkOnline);
   const [loading, setLoading] = useState(true);
   const [bioExpanded, setBioExpanded] = useState(false);
   const { light } = useHaptic();
@@ -54,8 +55,13 @@ export function EscortDetailScreen({ route, navigation }: Props) {
           api.get(`/escorts/${escortId}`),
           api.get(`/reviews/escort/${escortId}?limit=5`),
         ]);
-        setEscort(escortRes.data.data);
+        const escortData = escortRes.data.data;
+        setEscort(escortData);
         setReviews(reviewsRes.data.data?.data || reviewsRes.data.data || []);
+        // Check online status via REST API as fallback
+        if (escortData?.userId) {
+          checkOnline(escortData.userId);
+        }
       } catch {
         Toast.show({ type: 'error', text1: 'Gagal memuat profil escort' });
         navigation.goBack();

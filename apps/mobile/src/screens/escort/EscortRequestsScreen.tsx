@@ -10,7 +10,7 @@ import { RootStackParamList } from '../../navigation/RootNavigator';
 import { EmptyState } from '../../components/ui/EmptyState';
 import { AvatarWithStatus } from '../../components/ui/AvatarWithStatus';
 import { GradientButton } from '../../components/ui/GradientButton';
-import { COLORS, SPACING, RADIUS, SHADOWS, resolvePhotoUrl } from '../../constants/theme';
+import { COLORS, SPACING, RADIUS, SHADOWS, SERVICE_TYPE_LABELS, resolvePhotoUrl } from '../../constants/theme';
 import { Booking } from '../../constants/types';
 import { useHaptic } from '../../hooks/useHaptic';
 import api from '../../lib/api';
@@ -69,7 +69,7 @@ export function EscortRequestsScreen() {
             <AvatarWithStatus uri={clientPhoto} size={42} />
             <View style={{ flex: 1 }}>
               <Text style={styles.clientName}>{item.client?.firstName} {item.client?.lastName}</Text>
-              <Text style={styles.serviceType}>{item.serviceType}</Text>
+              <Text style={styles.serviceType}>{SERVICE_TYPE_LABELS[item.serviceType] || item.serviceType}</Text>
             </View>
             <Text style={styles.amount}>Rp {item.totalAmount.toLocaleString('id-ID')}</Text>
           </View>

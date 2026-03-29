@@ -12,7 +12,7 @@ import { GradientButton } from '../../components/ui/GradientButton';
 import { SkeletonProfile } from '../../components/ui/SkeletonLoader';
 import { AvatarWithStatus } from '../../components/ui/AvatarWithStatus';
 import { StepProgress } from '../../components/ui/ProgressBar';
-import { COLORS, SPACING, RADIUS, SHADOWS, BOOKING_STATUS_COLORS, PAYMENT_STATUS_COLORS, GRADIENTS, resolvePhotoUrl } from '../../constants/theme';
+import { COLORS, SPACING, RADIUS, SHADOWS, BOOKING_STATUS_COLORS, PAYMENT_STATUS_COLORS, GRADIENTS, SERVICE_TYPE_LABELS, resolvePhotoUrl } from '../../constants/theme';
 import { Booking } from '../../constants/types';
 import { useAuthStore } from '../../stores/auth';
 import { useHaptic } from '../../hooks/useHaptic';
@@ -83,6 +83,14 @@ export function BookingDetailScreen({ route, navigation }: Props) {
   const partnerPhoto = resolvePhotoUrl(partner?.profilePhoto);
 
   const STEPS = ['PENDING', 'CONFIRMED', 'ONGOING', 'COMPLETED'];
+  const STATUS_LABELS: Record<string, string> = {
+    PENDING: 'Menunggu',
+    CONFIRMED: 'Dikonfirmasi',
+    ONGOING: 'Berlangsung',
+    COMPLETED: 'Selesai',
+    CANCELLED: 'Dibatalkan',
+    DISPUTED: 'Sengketa',
+  };
   const currentStep = STEPS.indexOf(booking.status) >= 0 ? STEPS.indexOf(booking.status) + 1 : booking.status === 'CANCELLED' ? 0 : 1;
 
   return (
@@ -90,7 +98,7 @@ export function BookingDetailScreen({ route, navigation }: Props) {
       {/* Status */}
       <Animated.View entering={FadeInDown.delay(100).duration(400)} style={[styles.statusBar, { backgroundColor: statusColor + '12', borderColor: statusColor + '30' }]}>
         <Ionicons name="ellipse" size={10} color={statusColor} />
-        <Text style={[styles.statusLabel, { color: statusColor }]}>{booking.status}</Text>
+        <Text style={[styles.statusLabel, { color: statusColor }]}>{STATUS_LABELS[booking.status] || booking.status}</Text>
       </Animated.View>
 
       {/* Step Progress */}
@@ -99,7 +107,9 @@ export function BookingDetailScreen({ route, navigation }: Props) {
           <StepProgress total={4} current={currentStep} />
           <View style={styles.stepLabels}>
             {STEPS.map((s) => (
-              <Text key={s} style={[styles.stepLabel, STEPS.indexOf(s) < currentStep && styles.stepLabelActive]}>{s.slice(0, 4)}</Text>
+              <Text key={s} style={[styles.stepLabel, STEPS.indexOf(s) < currentStep && styles.stepLabelActive]}>
+                {STATUS_LABELS[s]}
+              </Text>
             ))}
           </View>
         </Animated.View>
@@ -121,7 +131,7 @@ export function BookingDetailScreen({ route, navigation }: Props) {
         <Text style={styles.sectionTitle}>
           <Ionicons name="document-text-outline" size={14} color={COLORS.gold} /> Detail Booking
         </Text>
-        <InfoRow icon="briefcase-outline" label="Tipe" value={booking.serviceType} />
+        <InfoRow icon="briefcase-outline" label="Tipe" value={SERVICE_TYPE_LABELS[booking.serviceType] || booking.serviceType} />
         <InfoRow icon="calendar-outline" label="Tanggal" value={dayjs(booking.startTime).format('DD MMM YYYY')} />
         <InfoRow icon="time-outline" label="Waktu" value={`${dayjs(booking.startTime).format('HH:mm')} - ${dayjs(booking.endTime).format('HH:mm')}`} />
         <InfoRow icon="location-outline" label="Lokasi" value={booking.location} />
@@ -147,7 +157,7 @@ export function BookingDetailScreen({ route, navigation }: Props) {
           <View style={[styles.paymentBadge, { backgroundColor: (PAYMENT_STATUS_COLORS[booking.payment.status] || COLORS.textMuted) + '15' }]}>
             <Ionicons name="ellipse" size={8} color={PAYMENT_STATUS_COLORS[booking.payment.status] || COLORS.textMuted} />
             <Text style={[styles.paymentStatus, { color: PAYMENT_STATUS_COLORS[booking.payment.status] || COLORS.textMuted }]}>
-              {booking.payment.status}
+              {{ PENDING: 'Menunggu', ESCROW: 'Ditahan', RELEASED: 'Dibayarkan', REFUNDED: 'Dikembalikan', FAILED: 'Gagal' }[booking.payment.status] || booking.payment.status}
             </Text>
           </View>
         )}
@@ -156,18 +166,50 @@ export function BookingDetailScreen({ route, navigation }: Props) {
 
       {/* Actions */}
       <Animated.View entering={FadeInDown.delay(300).duration(400)} style={styles.actions}>
+        {/* Escort: accept pending booking */}
         {isEscort && booking.status === 'PENDING' && (
           <GradientButton title="Terima Booking" onPress={() => handleAction('accept')} loading={actionLoading} />
         )}
-        {booking.status === 'CONFIRMED' && (
+
+        {/* Client: pay when confirmed but not yet paid */}
+        {!isEscort && booking.status === 'CONFIRMED' && !booking.payment && (
+          <>
+            <View style={styles.paymentRequiredBanner}>
+              <Ionicons name="wallet-outline" size={18} color={COLORS.warning} />
+              <Text style={styles.paymentRequiredText}>Selesaikan pembayaran untuk melanjutkan ke check-in</Text>
+            </View>
+            <GradientButton title="Bayar Sekarang" onPress={() => navigation.navigate('Payment', { bookingId: booking.id, amount: booking.totalAmount, bookingStatus: booking.status })} />
+          </>
+        )}
+
+        {/* Client: pay when pending (optional early payment) */}
+        {!isEscort && booking.status === 'PENDING' && !booking.payment && (
+          <GradientButton
+            title="Bayar Sekarang"
+            onPress={() => navigation.navigate('Payment', { bookingId: booking.id, amount: booking.totalAmount, bookingStatus: booking.status })}
+            variant="outline"
+          />
+        )}
+
+        {/* Escort: check-in only when confirmed AND payment exists (ESCROW) */}
+        {isEscort && booking.status === 'CONFIRMED' && booking.payment && ['ESCROW', 'PENDING'].includes(booking.payment.status) && (
           <GradientButton title="Check-In" onPress={() => handleAction('checkin')} loading={actionLoading} />
         )}
+
+        {/* Escort: waiting for payment notice */}
+        {isEscort && booking.status === 'CONFIRMED' && !booking.payment && (
+          <View style={styles.paymentRequiredBanner}>
+            <Ionicons name="time-outline" size={18} color={COLORS.info} />
+            <Text style={styles.paymentRequiredText}>Menunggu client menyelesaikan pembayaran sebelum check-in</Text>
+          </View>
+        )}
+
+        {/* Escort: check-out */}
         {isEscort && booking.status === 'ONGOING' && (
           <GradientButton title="Check-Out" onPress={() => handleAction('checkout')} loading={actionLoading} />
         )}
-        {!isEscort && booking.status === 'PENDING' && !booking.payment && (
-          <GradientButton title="Bayar Sekarang" onPress={() => navigation.navigate('Payment', { bookingId: booking.id, amount: booking.totalAmount })} />
-        )}
+
+        {/* Chat — available when confirmed or ongoing */}
         {['CONFIRMED', 'ONGOING'].includes(booking.status) && partner && (
           <Button
             title="Chat"
@@ -215,7 +257,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.dark },
   scroll: { padding: SPACING.base, paddingBottom: 40 },
   statusBar: {
-    padding: 14,
+    minHeight: 44,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     borderRadius: RADIUS.md,
     alignItems: 'center',
     marginBottom: SPACING.base,
@@ -224,10 +268,10 @@ const styles = StyleSheet.create({
     gap: 8,
     borderWidth: 1,
   },
-  statusLabel: { fontSize: 15, fontWeight: '700' },
+  statusLabel: { fontSize: 14, fontWeight: '700' },
   stepSection: { marginBottom: SPACING.base },
-  stepLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 },
-  stepLabel: { fontSize: 9, color: COLORS.textMuted, fontWeight: '600', letterSpacing: 0.3 },
+  stepLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
+  stepLabel: { fontSize: 11, color: COLORS.textMuted, fontWeight: '600', letterSpacing: 0.2, textAlign: 'center', flex: 1 },
   stepLabelActive: { color: COLORS.gold },
   section: {
     backgroundColor: COLORS.darkCard,
@@ -256,4 +300,20 @@ const styles = StyleSheet.create({
   },
   paymentStatus: { fontSize: 13, fontWeight: '600' },
   actions: { gap: 10, marginTop: SPACING.sm },
+  paymentRequiredBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: COLORS.warning + '10',
+    borderWidth: 1,
+    borderColor: COLORS.warning + '30',
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
+  },
+  paymentRequiredText: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.textSecondary,
+    lineHeight: 18,
+  },
 });

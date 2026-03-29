@@ -33,13 +33,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   initialize: async () => {
     try {
-      const token = await SecureStore.getItemAsync('accessToken');
+      const token = await SecureStore.getItemAsync('accessToken').catch(() => null);
       if (token) {
         await get().fetchProfile();
       }
     } catch {
-      await SecureStore.deleteItemAsync('accessToken');
-      await SecureStore.deleteItemAsync('refreshToken');
+      await SecureStore.deleteItemAsync('accessToken').catch(() => {});
+      await SecureStore.deleteItemAsync('refreshToken').catch(() => {});
     } finally {
       set({ isInitialized: true });
     }
@@ -50,10 +50,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const { data } = await api.post('/auth/login', { email, password });
       const { user, accessToken, refreshToken } = data.data;
-      await SecureStore.setItemAsync('accessToken', accessToken);
-      await SecureStore.setItemAsync('refreshToken', refreshToken);
+      await SecureStore.setItemAsync('accessToken', accessToken).catch(() => {});
+      await SecureStore.setItemAsync('refreshToken', refreshToken).catch(() => {});
       set({ user, isAuthenticated: true });
       connectSocket();
+    } catch (err: any) {
+      throw err;
     } finally {
       set({ isLoading: false });
     }
@@ -64,8 +66,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const { data } = await api.post('/auth/register', payload);
       const { user, accessToken, refreshToken } = data.data;
-      await SecureStore.setItemAsync('accessToken', accessToken);
-      await SecureStore.setItemAsync('refreshToken', refreshToken);
+      await SecureStore.setItemAsync('accessToken', accessToken).catch(() => {});
+      await SecureStore.setItemAsync('refreshToken', refreshToken).catch(() => {});
       set({ user, isAuthenticated: true });
       connectSocket();
     } finally {
@@ -77,8 +79,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await api.post('/auth/logout');
     } catch { /* ignore */ }
-    await SecureStore.deleteItemAsync('accessToken');
-    await SecureStore.deleteItemAsync('refreshToken');
+    await SecureStore.deleteItemAsync('accessToken').catch(() => {});
+    await SecureStore.deleteItemAsync('refreshToken').catch(() => {});
     disconnectSocket();
     set({ user: null, isAuthenticated: false });
   },

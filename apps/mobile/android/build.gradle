@@ -12,12 +12,25 @@ buildscript {
   }
 }
 
+def getNodeBinary = {
+  def nodePath = System.getenv("NODE_BINARY")
+  if (nodePath != null && !nodePath.isEmpty()) return nodePath
+  
+  def locations = ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"]
+  for (location in locations) {
+    if (new File(location).exists()) return location
+  }
+  return "node"
+}
+
+def nodeBinary = getNodeBinary()
+
 def reactNativeAndroidDir = new File(
-  providers.exec {
+  new File(providers.exec {
     workingDir(rootDir)
-    commandLine("node", "--print", "require.resolve('react-native/package.json')")
-  }.standardOutput.asText.get().trim(),
-  "../android"
+    commandLine(nodeBinary, "--print", "require.resolve('react-native/package.json')")
+  }.standardOutput.asText.get().trim()).parentFile,
+  "android"
 )
 
 allprojects {
@@ -33,5 +46,13 @@ allprojects {
   }
 }
 
+// Tell libraries (e.g. react-native-screens) where react-native lives so they
+// don't fall back to calling `node` — which may not be on the Gradle daemon's PATH.
+subprojects {
+  ext.REACT_NATIVE_NODE_MODULES_DIR = reactNativeAndroidDir.parentFile.absolutePath
+}
+
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
+
+

@@ -1,6 +1,6 @@
 import React, { useEffect, Component, ErrorInfo, ReactNode } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { View, Text, ScrollView, TouchableOpacity, LogBox, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Toast from 'react-native-toast-message';
@@ -19,20 +19,16 @@ import { usePushNotifications } from './src/lib/notifications';
 import { useLocationTracker } from './src/lib/location';
 import { usePresenceStore } from './src/stores/presence';
 
-// Capture global JS errors for on-screen display
+// Production-safe error log buffer for ErrorBoundary display
 const errorLog: string[] = [];
-const origConsoleError = console.error;
-console.error = (...args: any[]) => {
-  errorLog.push(args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' '));
-  if (errorLog.length > 50) errorLog.shift();
-  origConsoleError(...args);
-};
-
-const origGlobalHandler = (globalThis as any).ErrorUtils?.getGlobalHandler?.();
-(globalThis as any).ErrorUtils?.setGlobalHandler?.((error: Error, isFatal?: boolean) => {
-  errorLog.push(`[${isFatal ? 'FATAL' : 'ERROR'}] ${error?.message}\n${error?.stack?.slice(0, 500)}`);
-  origGlobalHandler?.(error, isFatal);
-});
+if (__DEV__) {
+  const origConsoleError = console.error;
+  console.error = (...args: any[]) => {
+    errorLog.push(args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' '));
+    if (errorLog.length > 50) errorLog.shift();
+    origConsoleError(...args);
+  };
+}
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string; stack: string }> {
   state = { hasError: false, error: '', stack: '' };
@@ -82,6 +78,10 @@ export default function App() {
     Inter_800ExtraBold,
   });
 
+  // Initialize auth state (check stored token, fetch profile)
+  useEffect(() => {
+    initialize().catch(() => {});
+  }, []);
 
   // Push notifications
   usePushNotifications();

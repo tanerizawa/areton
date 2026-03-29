@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Linking,
 } from 'react-native';
 import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -24,7 +24,6 @@ export function ProfileScreen() {
   const { user, logout } = useAuthStore();
   const [escortProfile, setEscortProfile] = useState<any>(null);
   const [unreadNotifs, setUnreadNotifs] = useState(0);
-  const [darkMode, setDarkMode] = useState(false);
   const logoutSheetRef = useRef<BottomSheet>(null);
   const { selection } = useHaptic();
 
@@ -117,8 +116,9 @@ export function ProfileScreen() {
         <Text style={styles.menuGroupLabel}>Akun</Text>
         <View style={styles.menu}>
           <MenuItem icon="create-outline" label="Edit Profil" onPress={() => { selection(); navigation.navigate('EditProfile'); }} />
+          <MenuItem icon="heart-outline" label="Favorit" onPress={() => { selection(); navigation.navigate('Favorites' as any); }} />
           <MenuItem icon="notifications-outline" label="Notifikasi" badge={unreadNotifs} onPress={() => { selection(); navigation.navigate('Notifications'); }} />
-          <MenuItem icon="shield-checkmark-outline" label="Keamanan" onPress={() => selection()} last />
+          <MenuItem icon="shield-checkmark-outline" label="Keamanan" onPress={() => { selection(); navigation.navigate('Security' as any); }} last />
         </View>
       </Animated.View>
 
@@ -128,15 +128,15 @@ export function ProfileScreen() {
         <View style={styles.menu}>
           <View style={[menuStyles.item, menuStyles.last]}>
             <View style={menuStyles.iconWrap}>
-              <Ionicons name="moon-outline" size={18} color={COLORS.textSecondary} />
+              <Ionicons name="moon" size={18} color={COLORS.gold} />
             </View>
-            <Text style={[menuStyles.label, { flex: 1 }]}>Mode Gelap</Text>
-            <Switch
-              value={darkMode}
-              onValueChange={setDarkMode}
-              trackColor={{ false: COLORS.darkBorder, true: COLORS.gold + '60' }}
-              thumbColor={darkMode ? COLORS.gold : COLORS.textMuted}
-            />
+            <View style={{ flex: 1 }}>
+              <Text style={menuStyles.label}>Tema Gelap</Text>
+              <Text style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 1 }}>Aktif secara default</Text>
+            </View>
+            <View style={{ backgroundColor: COLORS.success + '20', paddingHorizontal: 10, paddingVertical: 4, borderRadius: RADIUS.sm }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: COLORS.success }}>Aktif</Text>
+            </View>
           </View>
         </View>
       </Animated.View>
@@ -145,9 +145,10 @@ export function ProfileScreen() {
       <Animated.View entering={FadeInDown.delay(450).duration(500)}>
         <Text style={styles.menuGroupLabel}>Lainnya</Text>
         <View style={styles.menu}>
-          <MenuItem icon="help-circle-outline" label="Bantuan & FAQ" onPress={() => selection()} />
-          <MenuItem icon="document-text-outline" label="Syarat & Ketentuan" onPress={() => selection()} />
-          <MenuItem icon="star-outline" label="Beri Rating Aplikasi" onPress={() => selection()} last />
+          <MenuItem icon="help-circle-outline" label="Bantuan & FAQ" onPress={() => { selection(); Linking.openURL('https://areton.id/faq'); }} />
+          <MenuItem icon="document-text-outline" label="Syarat & Ketentuan" onPress={() => { selection(); Linking.openURL('https://areton.id/terms'); }} />
+          <MenuItem icon="lock-closed-outline" label="Kebijakan Privasi" onPress={() => { selection(); Linking.openURL('https://areton.id/privacy'); }} />
+          <MenuItem icon="star-outline" label="Beri Rating Aplikasi" onPress={() => { selection(); Linking.openURL('https://areton.id/download'); }} last />
         </View>
       </Animated.View>
 

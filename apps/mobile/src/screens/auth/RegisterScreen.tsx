@@ -42,6 +42,10 @@ export function RegisterScreen({ navigation }: Props) {
         Toast.show({ type: 'error', text1: 'Email harus diisi' });
         return;
       }
+      if (!/\S+@\S+\.\S+/.test(email.trim())) {
+        Toast.show({ type: 'error', text1: 'Format email tidak valid' });
+        return;
+      }
     }
     selection();
     setStep(step + 1);

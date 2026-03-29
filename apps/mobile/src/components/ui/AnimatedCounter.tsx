@@ -1,10 +1,11 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Text, StyleSheet, TextStyle } from 'react-native';
-import Animated, {
+import {
   useSharedValue,
-  useAnimatedProps,
   withTiming,
   Easing,
+  useAnimatedReaction,
+  runOnJS,
 } from 'react-native-reanimated';
 
 interface AnimatedCounterProps {
@@ -17,7 +18,16 @@ interface AnimatedCounterProps {
   formatter?: (n: number) => string;
 }
 
-const AnimatedText = Animated.createAnimatedComponent(Text);
+function formatValue(
+  v: number,
+  decimals: number,
+  formatter?: (n: number) => string,
+): string {
+  if (formatter) return formatter(v);
+  return decimals > 0
+    ? v.toFixed(decimals)
+    : Math.round(v).toLocaleString('id-ID');
+}
 
 export function AnimatedCounter({
   value,
@@ -28,7 +38,18 @@ export function AnimatedCounter({
   style,
   formatter,
 }: AnimatedCounterProps) {
-  const animValue = useSharedValue(0);
+  const animValue = useSharedValue(value);
+
+  const [displayText, setDisplayText] = useState(
+    () => `${prefix}${formatValue(value, decimals, formatter)}${suffix}`,
+  );
+
+  const updateText = useCallback(
+    (v: number) => {
+      setDisplayText(`${prefix}${formatValue(v, decimals, formatter)}${suffix}`);
+    },
+    [formatter, decimals, prefix, suffix],
+  );
 
   useEffect(() => {
     animValue.value = withTiming(value, {
@@ -37,25 +58,17 @@ export function AnimatedCounter({
     });
   }, [value, duration, animValue]);
 
-  const animProps = useAnimatedProps(() => {
-    const v = animValue.value;
-    const formatted = formatter
-      ? formatter(v)
-      : decimals > 0
-        ? v.toFixed(decimals)
-        : Math.round(v).toLocaleString('id-ID');
-    return {
-      text: `${prefix}${formatted}${suffix}`,
-    } as any;
-  });
+  useAnimatedReaction(
+    () => animValue.value,
+    (current) => {
+      runOnJS(updateText)(current);
+    },
+  );
 
   return (
-    <AnimatedText
-      style={[styles.text, style]}
-      animatedProps={animProps}
-    >
-      {`${prefix}${formatter ? formatter(value) : decimals > 0 ? value.toFixed(decimals) : Math.round(value).toLocaleString('id-ID')}${suffix}`}
-    </AnimatedText>
+    <Text style={[styles.text, style]}>
+      {displayText}
+    </Text>
   );
 }
 

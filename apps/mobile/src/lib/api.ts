@@ -2,6 +2,21 @@ import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import { API_URL } from '../constants/theme';
 
+// Lazy import to avoid circular dependency — resolved at call-time
+let _resetAuth: (() => void) | null = null;
+function getResetAuth() {
+  if (!_resetAuth) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { useAuthStore } = require('../stores/auth');
+      _resetAuth = () => useAuthStore.getState().setUser(null);
+    } catch {
+      _resetAuth = () => {};
+    }
+  }
+  return _resetAuth;
+}
+
 export const api = axios.create({
   baseURL: API_URL,
   headers: { 'Content-Type': 'application/json' },
@@ -11,9 +26,13 @@ export const api = axios.create({
 // Request interceptor — attach token
 api.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
-    const token = await SecureStore.getItemAsync('accessToken');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+    try {
+      const token = await SecureStore.getItemAsync('accessToken');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+    } catch {
+      // SecureStore unavailable — proceed without token
     }
     return config;
   },
@@ -73,9 +92,10 @@ api.interceptors.response.use(
         return api(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError, null);
-        await SecureStore.deleteItemAsync('accessToken');
-        await SecureStore.deleteItemAsync('refreshToken');
-        // Auth store will detect missing tokens and reset
+        await SecureStore.deleteItemAsync('accessToken').catch(() => {});
+        await SecureStore.deleteItemAsync('refreshToken').catch(() => {});
+        // Actively reset auth state so user is redirected to login
+        getResetAuth()();
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

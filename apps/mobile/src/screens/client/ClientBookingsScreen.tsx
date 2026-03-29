@@ -9,14 +9,30 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../navigation/RootNavigator';
 import { AvatarWithStatus } from '../../components/ui/AvatarWithStatus';
 import { EmptyState } from '../../components/ui/EmptyState';
-import { COLORS, SPACING, RADIUS, SHADOWS, BOOKING_STATUS_COLORS, resolvePhotoUrl } from '../../constants/theme';
+import { COLORS, SPACING, RADIUS, SHADOWS, BOOKING_STATUS_COLORS, SERVICE_TYPE_LABELS, resolvePhotoUrl } from '../../constants/theme';
 import { Booking, BookingStatus } from '../../constants/types';
 import { useAuthStore } from '../../stores/auth';
 import { useHaptic } from '../../hooks/useHaptic';
 import api from '../../lib/api';
 import dayjs from 'dayjs';
 
-const STATUS_TABS: (BookingStatus | 'ALL')[] = ['ALL', 'PENDING', 'CONFIRMED', 'ONGOING', 'COMPLETED', 'CANCELLED'];
+const STATUS_TABS: { key: BookingStatus | 'ALL'; label: string }[] = [
+  { key: 'ALL', label: 'Semua' },
+  { key: 'PENDING', label: 'Pending' },
+  { key: 'CONFIRMED', label: 'Dikonfirmasi' },
+  { key: 'ONGOING', label: 'Berlangsung' },
+  { key: 'COMPLETED', label: 'Selesai' },
+  { key: 'CANCELLED', label: 'Dibatalkan' },
+];
+
+const STATUS_LABELS: Record<string, string> = {
+  PENDING: 'Menunggu',
+  CONFIRMED: 'Dikonfirmasi',
+  ONGOING: 'Berlangsung',
+  COMPLETED: 'Selesai',
+  CANCELLED: 'Dibatalkan',
+  DISPUTED: 'Sengketa',
+};
 
 export function ClientBookingsScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -69,10 +85,10 @@ export function ClientBookingsScreen() {
       <View style={styles.cardHeader}>
         <View style={[styles.statusBadge, { backgroundColor: (BOOKING_STATUS_COLORS[item.status] || COLORS.textMuted) + '25' }]}>
           <Text style={[styles.statusText, { color: BOOKING_STATUS_COLORS[item.status] || COLORS.textMuted }]}>
-            {item.status}
+            {STATUS_LABELS[item.status] || item.status}
           </Text>
         </View>
-        <Text style={styles.serviceType}>{item.serviceType}</Text>
+        <Text style={styles.serviceType}>{SERVICE_TYPE_LABELS[item.serviceType] || item.serviceType}</Text>
       </View>
 
       <View style={styles.partnerRow}>
@@ -111,16 +127,16 @@ export function ClientBookingsScreen() {
       <FlatList
         horizontal
         data={STATUS_TABS}
-        keyExtractor={(i) => i}
+        keyExtractor={(i) => i.key}
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.filterList}
         renderItem={({ item: t }) => (
           <TouchableOpacity
-            style={[styles.filterChip, statusFilter === t && styles.filterChipActive]}
-            onPress={() => { setStatusFilter(t); selection(); }}
+            style={[styles.filterChip, statusFilter === t.key && styles.filterChipActive]}
+            onPress={() => { setStatusFilter(t.key); selection(); }}
           >
-            <Text style={[styles.filterText, statusFilter === t && styles.filterTextActive]}>
-              {t === 'ALL' ? 'Semua' : t}
+            <Text style={[styles.filterText, statusFilter === t.key && styles.filterTextActive]}>
+              {t.label}
             </Text>
           </TouchableOpacity>
         )}
@@ -150,14 +166,17 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.dark },
   header: { paddingHorizontal: SPACING.base, paddingTop: 56, paddingBottom: SPACING.sm },
   title: { fontSize: 24, fontWeight: '800', color: COLORS.textPrimary },
-  filterList: { paddingHorizontal: SPACING.base, gap: 8, paddingBottom: SPACING.md },
+  filterList: { paddingHorizontal: SPACING.base, paddingBottom: SPACING.md },
   filterChip: {
+    height: 34,
     paddingHorizontal: 14,
-    paddingVertical: 7,
+    marginRight: 8,
     borderRadius: RADIUS.pill,
     backgroundColor: COLORS.darkCard,
     borderWidth: 1,
     borderColor: COLORS.darkBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   filterChipActive: { backgroundColor: COLORS.gold + '20', borderColor: COLORS.gold },
   filterText: { fontSize: 12, color: COLORS.textMuted, fontWeight: '500' },
@@ -173,9 +192,15 @@ const styles = StyleSheet.create({
     ...SHADOWS.sm,
   },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  statusBadge: { paddingHorizontal: 10, paddingVertical: 3, borderRadius: RADIUS.sm },
-  statusText: { fontSize: 11, fontWeight: '700' },
-  serviceType: { fontSize: 12, color: COLORS.textMuted },
+  statusBadge: {
+    height: 24,
+    paddingHorizontal: 10,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statusText: { fontSize: 11, fontWeight: '700', lineHeight: 14 },
+  serviceType: { fontSize: 12, color: COLORS.textMuted, lineHeight: 16 },
   partnerRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
   partnerName: { fontSize: 16, fontWeight: '600', color: COLORS.textPrimary },
   detailRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },

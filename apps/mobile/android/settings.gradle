@@ -1,8 +1,20 @@
 pluginManagement {
+  def getNodePath = {
+    def nodePath = System.getenv("NODE_BINARY")
+    if (nodePath != null && !nodePath.isEmpty()) return nodePath
+    
+    def locations = ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"]
+    for (location in locations) {
+      if (new File(location).exists()) return location
+    }
+    return "node"
+  }
+  def nodeBinary = getNodePath()
+
   def reactNativeGradlePlugin = new File(
     providers.exec {
       workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
+      commandLine(nodeBinary, "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
     }.standardOutput.asText.get().trim()
   ).getParentFile().absolutePath
   includeBuild(reactNativeGradlePlugin)
@@ -10,7 +22,7 @@ pluginManagement {
   def expoPluginsPath = new File(
     providers.exec {
       workingDir(rootDir)
-      commandLine("node", "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
+      commandLine(nodeBinary, "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
     }.standardOutput.asText.get().trim(),
     "../android/expo-gradle-plugin"
   ).absolutePath
@@ -20,7 +32,45 @@ pluginManagement {
 plugins {
   id("com.facebook.react.settings")
   id("expo-autolinking-settings")
+  id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
 }
+
+// Inject node binary's directory into the Gradle daemon's PATH so that third-party
+// libraries calling `commandLine("node", ...)` can find it, even when the daemon is
+// launched from Android Studio with a minimal PATH.
+// This MUST run after plugins {} (for gradle access) but before project evaluation.
+def ensureNodeOnPath = {
+  def nodePath = System.getenv("NODE_BINARY")
+  if (!nodePath) {
+    def locations = ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"]
+    for (location in locations) {
+      if (new File(location).exists()) { nodePath = location; break }
+    }
+  }
+  if (!nodePath || nodePath == "node") return
+
+  def nodeDir = new File(nodePath).parent
+  def currentPath = System.getenv("PATH") ?: ""
+  if (currentPath.contains(nodeDir)) return
+
+  def updatedPath = "${nodeDir}${File.pathSeparator}${currentPath}"
+
+  // Modify Java's ProcessEnvironment.theEnvironment (the map that ProcessBuilder reads).
+  // System.getenv() and NativeServices.setenv() do NOT update this map — they only
+  // affect their own caches — so providers.exec/ProcessBuilder won't see those changes.
+  // Requires --add-opens=java.base/java.lang=ALL-UNNAMED in gradle.properties.
+  try {
+    def peClass = Class.forName("java.lang.ProcessEnvironment")
+    def envMethod = peClass.getDeclaredMethod("environment")
+    envMethod.setAccessible(true)
+    envMethod.invoke(null).put("PATH", updatedPath)
+  } catch (Throwable t) {
+    logger.warn("[Areton] Could not inject node into PATH: ${t.message}. " +
+      "Ensure --add-opens=java.base/java.lang=ALL-UNNAMED is in gradle.properties org.gradle.jvmargs, " +
+      "then restart the Gradle daemon (./gradlew --stop).")
+  }
+}
+ensureNodeOnPath()
 
 extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
   if (System.getenv('EXPO_USE_COMMUNITY_AUTOLINKING') == '1') {

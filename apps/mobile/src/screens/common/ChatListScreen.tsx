@@ -25,7 +25,7 @@ export function ChatListScreen() {
 
   const fetchRooms = useCallback(async () => {
     try {
-      const { data } = await api.get('/chat/rooms');
+      const { data } = await api.get('/chat/conversations');
       setRooms(data.data || []);
     } catch { /* ignore */ } finally {
       setLoading(false);

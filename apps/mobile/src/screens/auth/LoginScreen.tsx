@@ -28,11 +28,13 @@ export function LoginScreen({ navigation }: Props) {
     setEmailError('');
     setPasswordError('');
     if (!email.trim()) { setEmailError('Email harus diisi'); return; }
+    if (!/\S+@\S+\.\S+/.test(email.trim())) { setEmailError('Format email tidak valid'); return; }
     if (!password) { setPasswordError('Password harus diisi'); return; }
+    if (password.length < 6) { setPasswordError('Password minimal 6 karakter'); return; }
     try {
       await login(email.trim(), password);
     } catch (err: any) {
-      const msg = err?.response?.data?.message || 'Login gagal';
+      const msg = err?.response?.data?.message || 'Login gagal. Periksa email dan password Anda.';
       Toast.show({ type: 'error', text1: 'Login Gagal', text2: msg });
     }
   };

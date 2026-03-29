@@ -186,10 +186,11 @@ const ringStyles = StyleSheet.create({
   ring: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center', borderWidth: 3, marginBottom: 4 },
 });
 
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
 function QuickAction({ icon, label, color, onPress }: { icon: string; label: string; color: string; onPress: () => void }) {
   const scale = useSharedValue(1);
   const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-  const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
   return (
     <AnimatedPressable
       style={[qaStyles.item, animStyle]}

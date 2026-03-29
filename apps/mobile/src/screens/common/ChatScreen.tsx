@@ -13,8 +13,9 @@ import { BadgePill } from '../../components/ui/BadgePill';
 import { ChatMessage } from '../../constants/types';
 import { useAuthStore } from '../../stores/auth';
 import { useHaptic } from '../../hooks/useHaptic';
-import { getSocket } from '../../lib/socket';
+import { getSocket, connectSocket } from '../../lib/socket';
 import api from '../../lib/api';
+import Toast from 'react-native-toast-message';
 import dayjs from 'dayjs';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Chat'>;
@@ -84,6 +85,9 @@ export function ChatScreen({ route, navigation }: Props) {
     let cancelled = false;
     (async () => {
       try {
+        // Ensure socket is connected for real-time messaging
+        await connectSocket();
+
         const { data } = await api.get(`/chat/${bookingId}/messages`);
         if (!cancelled) setMessages((data.data?.data || data.data || []).reverse());
       } catch { /* ignore */ } finally {
@@ -115,13 +119,25 @@ export function ChatScreen({ route, navigation }: Props) {
     };
   }, [bookingId]);
 
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const content = text.trim();
     if (!content) return;
     light();
-    const socket = getSocket();
-    socket.emit('send_message', { bookingId, content, type: 'TEXT' });
     setText('');
+
+    const socket = getSocket();
+    if (socket.connected) {
+      socket.emit('send_message', { bookingId, content, type: 'TEXT' });
+    } else {
+      // REST fallback when socket is not connected
+      try {
+        const { data } = await api.post(`/chat/${bookingId}/messages`, { content, type: 'TEXT' });
+        const msg = data.data;
+        if (msg) setMessages((prev) => [...prev, msg]);
+      } catch {
+        Toast.show({ type: 'error', text1: 'Gagal mengirim pesan' });
+      }
+    }
   }, [text, bookingId, light]);
 
   const handleTextChange = useCallback((t: string) => {
