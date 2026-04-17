@@ -34,6 +34,7 @@ enum BookingStatus {
   COMPLETED
   CANCELLED
   DISPUTED
+  EXPIRED
 }
 
 enum PaymentStatus {
@@ -231,6 +232,9 @@ model Booking {
   @@index([escortId])
   @@index([status])
   @@index([startTime])
+  // Accelerates booking-availability & dashboard queries that filter by
+  // (escortId, status, startTime).
+  @@index([escortId, status, startTime])
   @@map("bookings")
 }
 
@@ -256,6 +260,7 @@ model Payment {
   refundClaims      RefundClaim[]
 
   @@index([status])
+  @@index([status, createdAt])
   @@map("payments")
 }
 
@@ -643,6 +648,26 @@ model DataExportRequest {
   @@index([userId])
   @@index([status])
   @@map("data_export_requests")
+}
+
+// ── Webhook Idempotency ────────────────────
+//
+// Records every accepted payment-gateway webhook so that duplicate deliveries
+// (which happen routinely, especially for Xendit/DOKU/NOWPayments) become
+// no-ops instead of re-applying status transitions.
+model WebhookEvent {
+  id         String   @id @default(uuid())
+  provider   String   // xendit | doku | nowpayments | other
+  eventId    String   // provider-supplied unique id (or computed hash)
+  rawPayload Json?
+  receivedAt DateTime @default(now())
+  processedAt DateTime?
+  status     String   @default("RECEIVED") // RECEIVED | PROCESSED | IGNORED | REJECTED
+  notes      String?
+
+  @@unique([provider, eventId])
+  @@index([provider, receivedAt])
+  @@map("webhook_events")
 }
 
 // ── Withdrawals ──────────────────────────────
