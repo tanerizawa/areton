@@ -14,10 +14,15 @@ export class LoggingInterceptor implements NestInterceptor {
     const userId = request.user?.id || 'anonymous';
     const now = Date.now();
 
-    // Correlation ID: use incoming header or generate new
-    const correlationId = request.get('x-correlation-id') || randomUUID();
+    // Correlation ID: reuse incoming header (x-correlation-id or x-request-id)
+    // so correlation propagates across LB/reverse-proxy hops; otherwise mint
+    // a fresh UUID. We reflect it back under both headers to ease tracing
+    // from either naming convention.
+    const correlationId =
+      request.get('x-correlation-id') || request.get('x-request-id') || randomUUID();
     request.correlationId = correlationId;
     response.setHeader('x-correlation-id', correlationId);
+    response.setHeader('x-request-id', correlationId);
 
     return next.handle().pipe(
       tap({

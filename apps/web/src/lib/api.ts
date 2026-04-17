@@ -9,17 +9,30 @@ export const api = axios.create({
   },
 });
 
-// Request interceptor — attach token (only on protected pages)
+// Paths that definitely require an authenticated session on the client. Used
+// only to decide *auto-redirect* behaviour (e.g. when a refresh attempt fails,
+// users on these routes should be sent to /login). The Authorization header
+// itself is attached unconditionally whenever a token is available.
+const PROTECTED_PATH_PREFIXES = ['/user/', '/escort/'];
+
+function isOnProtectedPage(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname;
+  return PROTECTED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+// Request interceptor — always attach the access token if we have one. The
+// previous implementation only attached the token when the current pathname
+// happened to start with `/user/` or `/escort/`, which silently broke requests
+// from shared components (navbar, presence provider, etc.) rendered on public
+// routes, and made it too easy to introduce regressions by adding new route
+// prefixes.
 api.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     if (typeof window !== 'undefined') {
-      const path = window.location.pathname;
-      const isProtectedPage = path.startsWith('/user/') || path.startsWith('/escort/');
-      if (isProtectedPage) {
-        const token = localStorage.getItem('accessToken');
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
-        }
+      const token = localStorage.getItem('accessToken');
+      if (token && !config.headers.Authorization) {
+        config.headers.Authorization = `Bearer ${token}`;
       }
     }
     return config;
@@ -45,78 +58,74 @@ function processQueue(error: any, token: string | null = null) {
   failedQueue = [];
 }
 
-// Response interceptor — auto-refresh token (deduplicated)
+// Response interceptor — auto-refresh token on 401 (deduplicated). A failed
+// refresh clears local credentials; a redirect to /login only happens when the
+// user is currently on a protected page (public pages keep rendering anonymous
+// content instead of being forcibly redirected).
 api.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
-    // Paths that require authenticated sessions — only redirect to login for these
-    const isProtectedPage = typeof window !== 'undefined' && 
-      (window.location.pathname.startsWith('/user/') || 
-       window.location.pathname.startsWith('/escort/'));
+    if (error.response?.status !== 401 || originalRequest._retry) {
+      return Promise.reject(error);
+    }
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      // On public pages, don't attempt refresh — just reject silently
-      if (!isProtectedPage) {
-        return Promise.reject(error);
-      }
+    originalRequest._retry = true;
 
-      originalRequest._retry = true;
-
-      // If already refreshing, queue this request
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({
-            resolve: (token: string) => {
-              originalRequest.headers.Authorization = `Bearer ${token}`;
-              resolve(api(originalRequest));
-            },
-            reject: (err: any) => {
-              reject(err);
-            },
-          });
+    // If a refresh is already in flight, queue this request for the new token.
+    if (isRefreshing) {
+      return new Promise((resolve, reject) => {
+        failedQueue.push({
+          resolve: (token: string) => {
+            originalRequest.headers.Authorization = `Bearer ${token}`;
+            resolve(api(originalRequest));
+          },
+          reject: (err: any) => reject(err),
         });
+      });
+    }
+
+    isRefreshing = true;
+
+    try {
+      const refreshToken = typeof window !== 'undefined'
+        ? localStorage.getItem('refreshToken')
+        : null;
+      if (!refreshToken) {
+        throw new Error('No refresh token');
       }
 
-      isRefreshing = true;
+      const response = await axios.post(`${API_URL}/auth/refresh`, { refreshToken });
+      const { accessToken, refreshToken: newRefreshToken } = response.data.data;
 
-      try {
-        const refreshToken = localStorage.getItem('refreshToken');
-        if (!refreshToken) {
-          throw new Error('No refresh token');
-        }
+      localStorage.setItem('accessToken', accessToken);
+      localStorage.setItem('refreshToken', newRefreshToken);
 
-        const response = await axios.post(`${API_URL}/auth/refresh`, { refreshToken });
-        const { accessToken, refreshToken: newRefreshToken } = response.data.data;
+      processQueue(null, accessToken);
 
-        localStorage.setItem('accessToken', accessToken);
-        localStorage.setItem('refreshToken', newRefreshToken);
-
-        processQueue(null, accessToken);
-
-        originalRequest.headers.Authorization = `Bearer ${accessToken}`;
-        return api(originalRequest);
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        // Clear tokens and Zustand auth state
+      originalRequest.headers.Authorization = `Bearer ${accessToken}`;
+      return api(originalRequest);
+    } catch (refreshError) {
+      processQueue(refreshError, null);
+      if (typeof window !== 'undefined') {
         localStorage.removeItem('accessToken');
         localStorage.removeItem('refreshToken');
         try {
           const { useAuthStore } = await import('@/stores/auth.store');
           useAuthStore.getState().setUser(null);
-        } catch { /* ignore */ }
-        // Redirect to login only from protected pages
-        if (typeof window !== 'undefined' && isProtectedPage && !window.location.pathname.startsWith('/login')) {
+        } catch {
+          /* ignore */
+        }
+        // Only force a redirect when we were actually on a protected page.
+        if (isOnProtectedPage() && !window.location.pathname.startsWith('/login')) {
           window.location.href = '/login';
         }
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
       }
+      return Promise.reject(refreshError);
+    } finally {
+      isRefreshing = false;
     }
-
-    return Promise.reject(error);
   },
 );
 

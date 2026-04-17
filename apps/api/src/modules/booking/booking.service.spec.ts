@@ -11,13 +11,20 @@ describe('BookingService', () => {
   let prisma: jest.Mocked<PrismaService>;
   let redis: jest.Mocked<RedisService>;
 
-  const mockPrisma = {
+  const mockPrisma: any = {
     user: { findFirst: jest.fn(), findUnique: jest.fn() },
     booking: { create: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     escortProfile: { findUnique: jest.fn() },
-    payment: { upsert: jest.fn(), updateMany: jest.fn() },
+    payment: { upsert: jest.fn(), updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     otp: { deleteMany: jest.fn() },
     refundClaim: { create: jest.fn() },
+    // Transaction executes the callback with a tx that is just the same mock
+    // object — sufficient for unit tests that exercise the orchestration
+    // logic without a real PG backend.
+    $transaction: jest.fn((fn: any) => fn(mockPrisma)),
+    // Advisory-lock raw call is a no-op in tests.
+    $executeRaw: jest.fn().mockResolvedValue(1),
+    $executeRawUnsafe: jest.fn().mockResolvedValue(1),
   };
 
   const mockRedis = {
@@ -74,7 +81,9 @@ describe('BookingService', () => {
       isActive: true,
       escortProfile: {
         isApproved: true,
-        hourlyRate: { toNumber: () => 500000 },
+        // Booking service constructs Prisma.Decimal from this; feed a plain
+        // number which Prisma.Decimal accepts.
+        hourlyRate: 500000 as any,
       },
     };
 
