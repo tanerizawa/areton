@@ -139,8 +139,16 @@ export class ChatService {
       throw new ForbiddenException('Chat hanya tersedia untuk booking yang aktif');
     }
 
-    // TODO: Encrypt message content before storing
-    const encryptedContent = this.encryption.encrypt(dto.content);
+    const content = typeof dto.content === 'string' ? dto.content.trim() : '';
+    if (!content) {
+      throw new BadRequestException('Pesan tidak boleh kosong');
+    }
+    if (content.length > 4000) {
+      throw new BadRequestException('Pesan terlalu panjang (maks 4000 karakter)');
+    }
+
+    // Encrypt message content at rest using AES-256-GCM.
+    const encryptedContent = this.encryption.encrypt(content);
 
     const message = await this.prisma.chatMessage.create({
       data: {
@@ -157,7 +165,7 @@ export class ChatService {
     // Return decrypted content for real-time delivery
     return {
       ...message,
-      content: dto.content,
+      content,
     };
   }
 
