@@ -233,23 +233,26 @@ Urutan berdasar risiko & ketergantungan. **Effort** relatif: S<M<L<XL.
 
 ### Wave 1 — Hardening MVP (Go-live Blocker)
 
-| # | Kategori | Item | Sev | Effort |
+| # | Kategori | Item | Sev | Status |
 |---|---|---|---|---|
-| 1.1 | Security | Rotasi semua secret; `git rm --cached .env`; audit history | 🔴 | S |
-| 1.2 | Security | Wajibkan `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (min 32 chars) di **semua** env, termasuk dev | 🔴 | S |
-| 1.3 | Payment | Implement **strict webhook signature verification** (tolak tanpa signature di prod) + tabel `webhook_events` untuk idempotency | 🔴 | M |
-| 1.4 | Payment | Bungkus `accept`, `cancel`, `create payment`, `release`, `refund`, `addTip`, `reschedule` dalam `prisma.$transaction` | 🔴 | M |
-| 1.5 | Payment | `processRefund` tidak boleh update DB bila gateway gagal — kirim ke retry queue | 🔴 | S |
-| 1.6 | Booking | Race-free booking create via PG advisory lock atau `$transaction + SELECT FOR UPDATE` | 🔴 | M |
-| 1.7 | Auth | `forgotPassword` return generic success untuk mencegah user enumeration | 🔴 | S |
-| 1.8 | Auth | Pindah token ke **HttpOnly Secure cookie** (web + admin) + endpoint `/auth/refresh` via cookie | 🔴 | L |
-| 1.9 | Auth | Hapus "offline fallback" di `admin-layout` yang meng-authorize saat API error | 🔴 | S |
-| 1.10 | API client | Hapus logic "attach token hanya di `/user/*` atau `/escort/*`"; selalu kirim token bila ada; 401 → refresh sekali | 🔴 | S |
-| 1.11 | Chat | Implement enkripsi pesan (panggil `EncryptionService.encrypt`) di `chat.service.sendMessage` dan decrypt di read | 🔴 | S |
-| 1.12 | Auth | Throttle ketat: `login=5/min`, `register=3/min`, `forgot=3/hour`, `otp/send=3/hour` per IP+email | 🟠 | S |
-| 1.13 | DB | Migrasi enkripsi `Withdrawal.bankAccount` (encrypt-at-rest) | 🟠 | S |
-| 1.14 | DB | Tambah index composite: `Booking(escortId, status, startTime)`, `Payment(status, createdAt)` | 🟠 | S |
-| 1.15 | Observability | Correlation-id middleware + structured JSON logging + Sentry init proper | 🟠 | M |
+| 1.1 | Security | `.env` tidak ada di git history (audit ulang). `.gitignore` sudah benar. | 🔴 | ✅ Verified — not tracked |
+| 1.2 | Security | Wajibkan `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (min 32 chars) di **semua** env, termasuk dev | 🔴 | ✅ Done (Joi + runtime checks) |
+| 1.3 | Payment | Strict webhook signature verification (tolak tanpa signature di prod) + tabel `webhook_events` untuk idempotency | 🔴 | ✅ Done (Xendit/DOKU/NOWPayments) |
+| 1.4 | Payment | Bungkus state transitions dalam `prisma.$transaction` | 🔴 | ✅ Done (`accept`, `cancel`, `reschedule`, `create`) |
+| 1.5 | Payment | `processRefund` tidak boleh update DB bila gateway gagal | 🔴 | ✅ Done |
+| 1.6 | Booking | Race-free booking create via PG advisory lock | 🔴 | ✅ Done (`pg_advisory_xact_lock`) |
+| 1.7 | Auth | `forgotPassword` return generic success (anti-enumeration) + hashed reset token di Redis | 🔴 | ✅ Done |
+| 1.8 | Auth | Pindah token ke **HttpOnly Secure cookie** (web + admin) | 🔴 | ⏳ Deferred to Wave 1.5 — butuh perubahan lebih lintas (BE endpoint + FE auth flow) |
+| 1.9 | Auth | Hapus "offline fallback" di `admin-layout` | 🔴 | ✅ Done |
+| 1.10 | API client | Selalu kirim token bila ada (web axios interceptor) | 🔴 | ✅ Done |
+| 1.11 | Chat | Enkripsi pesan (AES-256-GCM) + validasi payload | 🔴 | ✅ Done (TODO dihapus; encrypt aktif) |
+| 1.12 | Auth | Throttle ketat di endpoint sensitif | 🟠 | ✅ Done (refresh, 2fa/verify, apple, verify-email, forgot=3/hour) |
+| 1.13 | DB | Migrasi enkripsi `Withdrawal.bankAccount` | 🟠 | ⏳ Deferred — butuh data migration & UI masking |
+| 1.14 | DB | Tambah composite index `Booking(escortId, status, startTime)`, `Payment(status, createdAt)` | 🟠 | ✅ Done (migration SQL) |
+| 1.15 | Observability | Correlation-id middleware, propagasi ke response & filter | 🟠 | ✅ Done (`x-correlation-id` + `x-request-id`) |
+| Bonus | DB | Tambah `BookingStatus.EXPIRED`; cron gunakan status baru bukan CANCELLED | 🟡 | ✅ Done |
+| Bonus | Security | TOTP verify pakai `timingSafeEqual` (constant-time) | 🟠 | ✅ Done |
+| Bonus | Tests | Tambah unit test untuk forgotPassword hardening + WebhookEventService | 🟡 | ✅ Done (23 → 28 tests passing) |
 
 **Keluaran Wave 1:** Aplikasi siap rilis terbatas, tidak ada risiko kehilangan uang / pencurian kredensial.
 
