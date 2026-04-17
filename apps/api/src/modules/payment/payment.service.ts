@@ -12,12 +12,14 @@ import { Prisma } from '@prisma/client';
 import { XenditService } from './xendit.service';
 import { CryptoPaymentService } from './crypto-payment.service';
 import { DokuService } from './doku.service';
+import { WebhookEventService } from './webhook-event.service';
 import { EmailService } from '@modules/notification/email.service';
 import { PLATFORM_FEE_RATE, CANCELLATION_FEE_RATES } from '@common/constants/platform.constants';
 
 @Injectable()
 export class PaymentService {
   private readonly logger = new Logger(PaymentService.name);
+  private readonly isProduction = process.env.NODE_ENV === 'production';
 
   constructor(
     private readonly prisma: PrismaService,
@@ -25,6 +27,7 @@ export class PaymentService {
     private readonly xendit: XenditService,
     private readonly cryptoPayment: CryptoPaymentService,
     private readonly doku: DokuService,
+    private readonly webhookEvents: WebhookEventService,
     private readonly emailService: EmailService,
   ) {}
 
@@ -475,24 +478,45 @@ export class PaymentService {
     // Parse Xendit webhook notification
     const notification = this.xendit.parseWebhookNotification(payload);
 
-    // Verify callback token
-    if (callbackToken) {
-      if (this.xendit.isConfigured()) {
-        const isValid = this.xendit.verifyWebhookToken(callbackToken);
-        if (!isValid) {
-          this.logger.warn(`Invalid webhook callback token for invoice: ${notification.invoiceId}`);
-          return { status: 'error', message: 'Invalid callback token' };
-        }
+    // ── Signature verification ───────────────────────────
+    // In production we NEVER accept an unsigned webhook, regardless of
+    // gateway configuration state. In non-production we tolerate the legacy
+    // mock flow but require that the referenced payment actually exists.
+    if (this.xendit.isConfigured()) {
+      if (!callbackToken || !this.xendit.verifyWebhookToken(callbackToken)) {
+        this.logger.warn(
+          `Rejected Xendit webhook — invalid/missing callback token for invoice: ${notification.invoiceId}`,
+        );
+        return { status: 'error', message: 'Invalid callback token' };
       }
-    } else if (!this.xendit.isConfigured()) {
-      // Mock mode: only accept if externalId matches an existing payment's gateway ref
+    } else if (this.isProduction) {
+      // Misconfigured prod: fail closed.
+      this.logger.error('Xendit webhook received but gateway is not configured in production');
+      return { status: 'error', message: 'Gateway not configured' };
+    } else if (!callbackToken) {
       const exists = await this.prisma.payment.findFirst({
         where: { paymentGatewayRef: notification.externalId },
       });
       if (!exists) {
-        this.logger.warn(`Mock webhook rejected: no payment found for order ${notification.externalId}`);
+        this.logger.warn(
+          `Mock webhook rejected: no payment found for order ${notification.externalId}`,
+        );
         return { status: 'error', message: 'Unauthorized mock webhook' };
       }
+    }
+
+    // ── Idempotency ──────────────────────────────────────
+    const eventId =
+      notification.invoiceId ||
+      WebhookEventService.fallbackEventId([
+        'xendit',
+        notification.externalId,
+        notification.status,
+        notification.paidAt,
+      ]);
+    const idem = await this.webhookEvents.claim('xendit', eventId, payload);
+    if (!idem.firstSeen) {
+      return { status: 'duplicate', eventId };
     }
 
     // Find payment by gateway reference (externalId = our orderId)
@@ -506,18 +530,18 @@ export class PaymentService {
       include: { booking: true },
     });
 
-    // If payment marked forfeited, don't process webhook
     if (payment?.forfeited) {
       this.logger.log(`Webhook ignored for forfeited payment: ${notification.externalId}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment forfeited');
       return { status: 'ignored', message: 'Payment forfeited' };
     }
 
     if (!payment) {
       this.logger.warn(`Webhook: payment not found for order ${notification.externalId}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment not found');
       return { status: 'ignored', message: 'Payment not found' };
     }
 
-    // Map Xendit invoice status to our payment status
     const statusMap: Record<string, string> = {
       PAID: 'ESCROW',
       SETTLED: 'ESCROW',
@@ -526,6 +550,7 @@ export class PaymentService {
 
     const newStatus = statusMap[notification.status];
     if (!newStatus) {
+      await this.webhookEvents.markIgnored(idem.recordId, `Unknown status: ${notification.status}`);
       return { status: 'ignored', message: `Unknown status: ${notification.status}` };
     }
 
@@ -539,7 +564,6 @@ export class PaymentService {
       data: updateData,
     });
 
-    // Send payment-received email when payment enters escrow
     if (newStatus === 'ESCROW') {
       const client = await this.prisma.user.findUnique({
         where: { id: payment.booking.clientId },
@@ -555,29 +579,49 @@ export class PaymentService {
     }
 
     this.logger.log(`Webhook processed: ${notification.externalId} → ${newStatus}`);
+    await this.webhookEvents.markProcessed(idem.recordId, `${notification.externalId} → ${newStatus}`);
     return { status: 'ok', paymentId: payment.id, newStatus };
   }
 
   async handleCryptoWebhook(payload: any, signature?: string) {
     const notification = this.cryptoPayment.parseWebhookNotification(payload);
 
-    // Verify IPN signature
-    if (signature) {
-      if (this.cryptoPayment.isConfigured()) {
-        const isValid = this.cryptoPayment.verifyWebhookSignature(payload, signature);
-        if (!isValid) {
-          this.logger.warn(`Invalid crypto webhook signature for payment: ${notification.paymentId}`);
-          return { status: 'error', message: 'Invalid signature' };
-        }
+    // Signature verification — strict in production. See handleWebhook() for
+    // the rationale.
+    if (this.cryptoPayment.isConfigured()) {
+      if (!signature || !this.cryptoPayment.verifyWebhookSignature(payload, signature)) {
+        this.logger.warn(
+          `Rejected crypto webhook — invalid/missing signature for payment: ${notification.paymentId}`,
+        );
+        return { status: 'error', message: 'Invalid signature' };
       }
-    } else if (!this.cryptoPayment.isConfigured()) {
+    } else if (this.isProduction) {
+      this.logger.error('Crypto webhook received but gateway is not configured in production');
+      return { status: 'error', message: 'Gateway not configured' };
+    } else if (!signature) {
       const exists = await this.prisma.payment.findFirst({
         where: { paymentGatewayRef: notification.orderId },
       });
       if (!exists) {
-        this.logger.warn(`Mock crypto webhook rejected: no payment for order ${notification.orderId}`);
+        this.logger.warn(
+          `Mock crypto webhook rejected: no payment for order ${notification.orderId}`,
+        );
         return { status: 'error', message: 'Unauthorized mock webhook' };
       }
+    }
+
+    // Idempotency.
+    const eventId =
+      notification.paymentId ||
+      WebhookEventService.fallbackEventId([
+        'nowpayments',
+        notification.orderId,
+        notification.status,
+        notification.payCurrency,
+      ]);
+    const idem = await this.webhookEvents.claim('nowpayments', eventId, payload);
+    if (!idem.firstSeen) {
+      return { status: 'duplicate', eventId };
     }
 
     // Find payment by gateway reference
@@ -593,11 +637,13 @@ export class PaymentService {
 
     if (payment?.forfeited) {
       this.logger.log(`Crypto webhook ignored for forfeited payment: ${notification.orderId}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment forfeited');
       return { status: 'ignored', message: 'Payment forfeited' };
     }
 
     if (!payment) {
       this.logger.warn(`Crypto webhook: payment not found for order ${notification.orderId}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment not found');
       return { status: 'ignored', message: 'Payment not found' };
     }
 
@@ -613,7 +659,13 @@ export class PaymentService {
 
     const newStatus = statusMap[notification.status];
     if (!newStatus) {
-      this.logger.log(`Crypto webhook status update: ${notification.orderId} → ${notification.status} (no action)`);
+      this.logger.log(
+        `Crypto webhook status update: ${notification.orderId} → ${notification.status} (no action)`,
+      );
+      await this.webhookEvents.markIgnored(
+        idem.recordId,
+        `Status ${notification.status} — no action`,
+      );
       return { status: 'ignored', message: `Status ${notification.status} — no action` };
     }
 
@@ -643,28 +695,63 @@ export class PaymentService {
       }
     }
 
-    this.logger.log(`Crypto webhook processed: ${notification.orderId} → ${newStatus} (${notification.payCurrency})`);
+    this.logger.log(
+      `Crypto webhook processed: ${notification.orderId} → ${newStatus} (${notification.payCurrency})`,
+    );
+    await this.webhookEvents.markProcessed(
+      idem.recordId,
+      `${notification.orderId} → ${newStatus} (${notification.payCurrency})`,
+    );
     return { status: 'ok', paymentId: payment.id, newStatus, crypto: notification.payCurrency };
   }
 
-  async handleDokuWebhook(payload: any, headers: { clientId?: string; requestId?: string; requestTimestamp?: string; signature?: string }) {
+  async handleDokuWebhook(
+    payload: any,
+    headers: { clientId?: string; requestId?: string; requestTimestamp?: string; signature?: string },
+  ) {
     const notification = this.doku.parseWebhookNotification(payload);
 
-    // Verify DOKU notification signature
-    if (headers.signature && headers.clientId && headers.requestId && headers.requestTimestamp) {
-      if (this.doku.isConfigured()) {
-        const isValid = this.doku.verifyNotificationSignature(
-          payload,
-          headers.clientId,
-          headers.requestId,
-          headers.requestTimestamp,
-          headers.signature,
+    // Strict signature check in production.
+    const hasSignatureBundle = Boolean(
+      headers.signature && headers.clientId && headers.requestId && headers.requestTimestamp,
+    );
+    if (this.doku.isConfigured()) {
+      if (!hasSignatureBundle) {
+        this.logger.warn(
+          `Rejected DOKU webhook — missing signature headers for invoice: ${notification.invoiceNumber}`,
         );
-        if (!isValid) {
-          this.logger.warn(`Invalid DOKU webhook signature for invoice: ${notification.invoiceNumber}`);
-          return { status: 'error', message: 'Invalid signature' };
-        }
+        return { status: 'error', message: 'Missing signature' };
       }
+      const isValid = this.doku.verifyNotificationSignature(
+        payload,
+        headers.clientId!,
+        headers.requestId!,
+        headers.requestTimestamp!,
+        headers.signature!,
+      );
+      if (!isValid) {
+        this.logger.warn(
+          `Invalid DOKU webhook signature for invoice: ${notification.invoiceNumber}`,
+        );
+        return { status: 'error', message: 'Invalid signature' };
+      }
+    } else if (this.isProduction) {
+      this.logger.error('DOKU webhook received but gateway is not configured in production');
+      return { status: 'error', message: 'Gateway not configured' };
+    }
+
+    // Idempotency.
+    const eventId =
+      notification.invoiceNumber ||
+      WebhookEventService.fallbackEventId([
+        'doku',
+        notification.invoiceNumber,
+        notification.status,
+        notification.paymentChannel,
+      ]);
+    const idem = await this.webhookEvents.claim('doku', eventId, payload);
+    if (!idem.firstSeen) {
+      return { status: 'duplicate', eventId };
     }
 
     // Find payment by gateway reference (invoiceNumber = our orderId)
@@ -680,11 +767,13 @@ export class PaymentService {
 
     if (payment?.forfeited) {
       this.logger.log(`DOKU webhook ignored for forfeited payment: ${notification.invoiceNumber}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment forfeited');
       return { status: 'ignored', message: 'Payment forfeited' };
     }
 
     if (!payment) {
       this.logger.warn(`DOKU webhook: payment not found for order ${notification.invoiceNumber}`);
+      await this.webhookEvents.markIgnored(idem.recordId, 'Payment not found');
       return { status: 'ignored', message: 'Payment not found' };
     }
 
@@ -698,7 +787,13 @@ export class PaymentService {
 
     const newStatus = statusMap[notification.status];
     if (!newStatus) {
-      this.logger.log(`DOKU webhook status: ${notification.invoiceNumber} → ${notification.status} (no action)`);
+      this.logger.log(
+        `DOKU webhook status: ${notification.invoiceNumber} → ${notification.status} (no action)`,
+      );
+      await this.webhookEvents.markIgnored(
+        idem.recordId,
+        `Status ${notification.status} — no action`,
+      );
       return { status: 'ignored', message: `Status ${notification.status} — no action` };
     }
 
@@ -732,7 +827,13 @@ export class PaymentService {
       }
     }
 
-    this.logger.log(`DOKU webhook processed: ${notification.invoiceNumber} → ${newStatus} (${notification.paymentChannel})`);
+    this.logger.log(
+      `DOKU webhook processed: ${notification.invoiceNumber} → ${newStatus} (${notification.paymentChannel})`,
+    );
+    await this.webhookEvents.markProcessed(
+      idem.recordId,
+      `${notification.invoiceNumber} → ${newStatus} (${notification.paymentChannel})`,
+    );
     return { status: 'ok', paymentId: payment.id, newStatus, channel: notification.paymentChannel };
   }
 
@@ -845,44 +946,51 @@ export class PaymentService {
       throw new BadRequestException('Payment is not marked as forfeited');
     }
 
-    try {
-      // Process refund through Xendit
-      let refundResponse = null;
-      if (payment.paymentGatewayRef && payment.paidAt) {
-        try {
-          refundResponse = await this.xendit.processRefund({
-            invoiceId: payment.paymentGatewayRef,
-            amount: payment.amount.toNumber(),
-            reason: options.reason,
-          });
-        } catch (error) {
-          this.logger.error('Xendit refund failed:', error);
-          // Continue with database update even if gateway refund fails
-        }
+    // Refund flow: the DB must only reflect REFUNDED after the gateway has
+    // actually accepted the refund. Previously we swallowed gateway errors and
+    // still marked the payment as refunded, which caused silent loss of funds
+    // to the customer (DB says refunded, gateway never sent money back).
+    let refundResponse: unknown = null;
+    const hasGatewayTransaction = Boolean(payment.paymentGatewayRef && payment.paidAt);
+
+    if (hasGatewayTransaction) {
+      try {
+        refundResponse = await this.xendit.processRefund({
+          invoiceId: payment.paymentGatewayRef!,
+          amount: payment.amount.toNumber(),
+          reason: options.reason,
+        });
+      } catch (error) {
+        this.logger.error(
+          `Xendit refund failed for payment ${paymentId} (admin ${options.adminId}): ${(error as Error)?.message}`,
+          (error as Error)?.stack,
+        );
+        // Do NOT mark as refunded. Surface the error so admin UI / queue can
+        // retry rather than creating a state divergence between gateway & DB.
+        throw new BadRequestException(
+          'Refund gagal diproses oleh payment gateway. Coba lagi atau proses manual.',
+        );
       }
-
-      // Update payment status to REFUNDED
-      const updatedPayment = await this.prisma.payment.update({
-        where: { id: paymentId },
-        data: {
-          status: 'REFUNDED',
-          refundedAt: new Date(),
-        },
-      });
-
-      // Log the refund processing
-      this.logger.log(
-        `Refund processed for payment ${paymentId} by admin ${options.adminId}. ` +
-        `Amount: ${payment.amount}. Xendit response: ${JSON.stringify(refundResponse)}`
-      );
-
-      return {
-        payment: updatedPayment,
-        refundResponse,
-      };
-    } catch (error) {
-      this.logger.error('Failed to process refund:', error);
-      throw new BadRequestException('Failed to process refund');
     }
+
+    // Either no gateway transaction existed (pre-escrow refund) or the gateway
+    // refund succeeded. Safe to update our record.
+    const updatedPayment = await this.prisma.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: 'REFUNDED',
+        refundedAt: new Date(),
+      },
+    });
+
+    this.logger.log(
+      `Refund processed for payment ${paymentId} by admin ${options.adminId}. ` +
+        `Amount: ${payment.amount}. Gateway response: ${JSON.stringify(refundResponse)}`,
+    );
+
+    return {
+      payment: updatedPayment,
+      refundResponse,
+    };
   }
 }

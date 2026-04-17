@@ -6,6 +6,7 @@ import { RedisService } from '@/config/redis.service';
 import { XenditService } from './xendit.service';
 import { CryptoPaymentService } from './crypto-payment.service';
 import { DokuService } from './doku.service';
+import { WebhookEventService } from './webhook-event.service';
 import { EmailService } from '@modules/notification/email.service';
 import { Prisma } from '@prisma/client';
 
@@ -42,6 +43,13 @@ describe('PaymentService', () => {
     sendPaymentConfirmation: jest.fn().mockResolvedValue(undefined),
   };
 
+  const mockWebhookEvents = {
+    claim: jest.fn().mockResolvedValue({ firstSeen: true, recordId: 'wh-1' }),
+    markProcessed: jest.fn().mockResolvedValue(undefined),
+    markIgnored: jest.fn().mockResolvedValue(undefined),
+    markRejected: jest.fn().mockResolvedValue(undefined),
+  };
+
   const baseBooking = {
     id: 'booking-1',
     clientId: 'client-1',
@@ -66,6 +74,7 @@ describe('PaymentService', () => {
         { provide: XenditService, useValue: mockXendit },
         { provide: CryptoPaymentService, useValue: mockCrypto },
         { provide: DokuService, useValue: mockDoku },
+        { provide: WebhookEventService, useValue: mockWebhookEvents },
         { provide: EmailService, useValue: mockEmail },
       ],
     }).compile();
