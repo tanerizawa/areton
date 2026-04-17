@@ -54,7 +54,6 @@ export class BookingService {
       include: { escortProfile: true },
     });
 
-    // Fallback: try looking up by escort profile ID
     if (!escort) {
       const profile = await this.prisma.escortProfile.findUnique({
         where: { id: dto.escortId },
@@ -65,7 +64,6 @@ export class BookingService {
           where: { id: profile.userId, role: 'ESCORT', isActive: true },
           include: { escortProfile: true },
         });
-        // Override dto escortId with the resolved user ID
         dto.escortId = profile.userId;
       }
     }
@@ -74,8 +72,11 @@ export class BookingService {
       throw new BadRequestException('Escort tidak tersedia atau belum terverifikasi');
     }
 
-    if (!escort.escortProfile.hourlyRate || escort.escortProfile.hourlyRate.toNumber() <= 0) {
-      throw new BadRequestException('Escort belum mengatur tarif per jam. Silakan hubungi escort untuk mengupdate profil.');
+    const hourlyRateDecimal = new Prisma.Decimal(escort.escortProfile.hourlyRate ?? 0);
+    if (hourlyRateDecimal.lte(0)) {
+      throw new BadRequestException(
+        'Escort belum mengatur tarif per jam. Silakan hubungi escort untuk mengupdate profil.',
+      );
     }
 
     if (clientId === dto.escortId) {
@@ -98,48 +99,79 @@ export class BookingService {
       throw new BadRequestException('Minimum durasi booking adalah 3 jam');
     }
 
-    // Check escort availability (no overlapping bookings)
-    const overlap = await this.prisma.booking.findFirst({
-      where: {
-        escortId: dto.escortId,
-        status: { in: ['PENDING', 'CONFIRMED', 'ONGOING'] },
-        OR: [
-          { startTime: { lt: endTime }, endTime: { gt: startTime } },
-        ],
-      },
-    });
+    // Calculate total amount using Decimal arithmetic end-to-end to avoid
+    // floating-point drift on large hourly rates.
+    const totalAmount = hourlyRateDecimal.mul(new Prisma.Decimal(durationHours));
 
-    if (overlap) {
-      throw new BadRequestException('Escort tidak tersedia pada waktu yang dipilih');
+    // ── Race-free booking creation ───────────────────────
+    // We take a transaction-scoped PG advisory lock keyed on the escort id to
+    // serialise concurrent booking attempts against the same escort. The
+    // overlap re-check + insert then happen inside the same transaction so
+    // that two clients cannot both pass the overlap check and double-book.
+    try {
+      const booking = await this.prisma.$transaction(async (tx) => {
+        await this.acquireEscortBookingLock(tx, dto.escortId);
+
+        const overlap = await tx.booking.findFirst({
+          where: {
+            escortId: dto.escortId,
+            status: { in: ['PENDING', 'CONFIRMED', 'ONGOING'] },
+            OR: [{ startTime: { lt: endTime }, endTime: { gt: startTime } }],
+          },
+          select: { id: true },
+        });
+
+        if (overlap) {
+          throw new BadRequestException('Escort tidak tersedia pada waktu yang dipilih');
+        }
+
+        return tx.booking.create({
+          data: {
+            clientId,
+            escortId: dto.escortId,
+            serviceType: dto.serviceType,
+            startTime,
+            endTime,
+            location: dto.location,
+            locationLat: dto.locationLat,
+            locationLng: dto.locationLng,
+            specialRequests: dto.specialRequests,
+            totalAmount,
+          },
+          include: {
+            client: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
+            escort: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
+          },
+        });
+      });
+
+      this.notificationService.notifyBookingStatus(booking.id, 'PENDING').catch(() => {});
+
+      return booking;
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.logger.error(
+        `Failed to create booking for escort ${dto.escortId}: ${(err as Error)?.message}`,
+        (err as Error)?.stack,
+      );
+      throw err;
     }
+  }
 
-    // Calculate total amount
-    const hourlyRate = escort.escortProfile.hourlyRate;
-    const totalAmount = new Prisma.Decimal(hourlyRate.toNumber() * durationHours);
-
-    const booking = await this.prisma.booking.create({
-      data: {
-        clientId,
-        escortId: dto.escortId,
-        serviceType: dto.serviceType,
-        startTime,
-        endTime,
-        location: dto.location,
-        locationLat: dto.locationLat,
-        locationLng: dto.locationLng,
-        specialRequests: dto.specialRequests,
-        totalAmount,
-      },
-      include: {
-        client: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
-        escort: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
-      },
-    });
-
-    // Notify escort about new booking request
-    this.notificationService.notifyBookingStatus(booking.id, 'PENDING').catch(() => {});
-
-    return booking;
+  /**
+   * Acquire a PostgreSQL transaction-scoped advisory lock keyed on the escort
+   * id. Released automatically at tx commit/rollback. Using `hashtext()` keeps
+   * the key within `bigint` range.
+   */
+  private async acquireEscortBookingLock(
+    tx: Prisma.TransactionClient,
+    escortId: string,
+  ): Promise<void> {
+    // Namespaced key so the hash space does not collide with any other
+    // advisory lock usage in the codebase. `hashtext` returns a 32-bit int,
+    // which fits PG's advisory-lock bigint key.
+    const key = `booking:escort:${escortId}`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
   }
 
   async findAll(userId: string, role: string, query: BookingQueryDto) {
@@ -341,38 +373,45 @@ export class BookingService {
   }
 
   async accept(escortId: string, bookingId: string) {
-    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
-
-    if (!booking) throw new NotFoundException('Booking tidak ditemukan');
-    if (booking.escortId !== escortId) throw new ForbiddenException('Bukan booking Anda');
-    if (booking.status !== 'PENDING') throw new BadRequestException('Booking tidak dalam status PENDING');
-
-    const updated = await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: { status: 'CONFIRMED' },
-    });
-
-    // Auto-create Payment record
-    const totalAmount = booking.totalAmount;
     const commissionRate = await this.getCommissionRate();
-    const platformFee = totalAmount.mul(new Prisma.Decimal(commissionRate));
-    const escortPayout = totalAmount.sub(platformFee);
 
-    await this.prisma.payment.upsert({
-      where: { bookingId },
-      create: {
-        bookingId,
-        amount: totalAmount,
-        method: 'PLATFORM',
-        status: 'PENDING',
-        platformFee,
-        escortPayout,
-      },
-      update: {}, // Don't overwrite if already exists
+    // Status transition + payment stub must be atomic so the DB never ends up
+    // with a CONFIRMED booking but no payment row, or vice versa.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const booking = await tx.booking.findUnique({ where: { id: bookingId } });
+
+      if (!booking) throw new NotFoundException('Booking tidak ditemukan');
+      if (booking.escortId !== escortId) throw new ForbiddenException('Bukan booking Anda');
+      if (booking.status !== 'PENDING') {
+        throw new BadRequestException('Booking tidak dalam status PENDING');
+      }
+
+      const totalAmount = booking.totalAmount;
+      const platformFee = totalAmount.mul(new Prisma.Decimal(commissionRate));
+      const escortPayout = totalAmount.sub(platformFee);
+
+      const next = await tx.booking.update({
+        where: { id: bookingId },
+        data: { status: 'CONFIRMED' },
+      });
+
+      await tx.payment.upsert({
+        where: { bookingId },
+        create: {
+          bookingId,
+          amount: totalAmount,
+          method: 'PLATFORM',
+          status: 'PENDING',
+          platformFee,
+          escortPayout,
+        },
+        update: {},
+      });
+
+      return next;
     });
 
-    // Notify client
-    await this.notificationService.notifyBookingStatus(bookingId, 'CONFIRMED');
+    this.notificationService.notifyBookingStatus(bookingId, 'CONFIRMED').catch(() => {});
 
     return updated;
   }
@@ -440,60 +479,89 @@ export class BookingService {
     const cancellationFeeRate = feePercent / 100;
     const lateCancellation = feePercent > 0;
 
-    const updated = await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancelledBy: userId,
-        cancelReason: reason || (lateCancellation
-          ? `Pembatalan terlambat — biaya pembatalan ${feePercent}%`
-          : 'Dibatalkan oleh client'),
-      },
-    });
+    // Booking-status change + forfeited flag + refund-claim creation must be
+    // atomic so we never get a cancelled booking without a refund-claim (or
+    // vice versa) in case the process crashes mid-flow.
+    const { updated, createdClaim, cancellationFeeAmount, refundAmount } =
+      await this.prisma.$transaction(async (tx) => {
+        const next = await tx.booking.update({
+          where: { id: bookingId },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: new Date(),
+            cancelledBy: userId,
+            cancelReason:
+              reason ||
+              (lateCancellation
+                ? `Pembatalan terlambat — biaya pembatalan ${feePercent}%`
+                : 'Dibatalkan oleh client'),
+          },
+        });
 
-    // If a payment exists, calculate refund minus cancellation fee
-    if (booking.payment) {
-      const paymentAmount = booking.payment.amount.toNumber();
-      const cancellationFeeAmount = Math.round(paymentAmount * cancellationFeeRate);
-      const refundAmount = paymentAmount - cancellationFeeAmount;
+        let claim: { id: string } | null = null;
+        let feeAmount = 0;
+        let refund = 0;
 
-      await this.prisma.payment.update({
-        where: { id: booking.payment.id },
-        data: { forfeited: cancellationFeeRate >= 1.0 },
+        if (booking.payment) {
+          const paymentAmount = booking.payment.amount.toNumber();
+          feeAmount = Math.round(paymentAmount * cancellationFeeRate);
+          refund = paymentAmount - feeAmount;
+
+          await tx.payment.update({
+            where: { id: booking.payment.id },
+            data: { forfeited: cancellationFeeRate >= 1.0 },
+          });
+
+          claim = await tx.refundClaim.create({
+            data: {
+              paymentId: booking.payment.id,
+              bookingId: booking.id,
+              requesterId: userId,
+              reason:
+                reason ||
+                (lateCancellation
+                  ? `Pembatalan ${hoursUntilStart.toFixed(1)} jam sebelum jadwal`
+                  : 'Dibatalkan oleh client'),
+              evidence: {
+                cancellationFeePercent: feePercent,
+                cancellationFeeAmount: feeAmount,
+                refundAmount: refund,
+                hoursBeforeStart: Math.round(hoursUntilStart * 10) / 10,
+              },
+            },
+            select: { id: true },
+          });
+        }
+
+        return {
+          updated: next,
+          createdClaim: claim,
+          cancellationFeeAmount: feeAmount,
+          refundAmount: refund,
+        };
       });
 
-      const claim = await this.prisma.refundClaim.create({ data: {
-        paymentId: booking.payment.id,
-        bookingId: booking.id,
-        requesterId: userId,
-        reason: reason || (lateCancellation
-          ? `Pembatalan ${hoursUntilStart.toFixed(1)} jam sebelum jadwal`
-          : 'Dibatalkan oleh client'),
-        evidence: {
-          cancellationFeePercent: feePercent,
-          cancellationFeeAmount,
-          refundAmount,
-          hoursBeforeStart: Math.round(hoursUntilStart * 10) / 10,
-        },
-      }});
-
-      // Notify admins about the new refund claim
-      const clientName = `${booking.client?.firstName || ''} ${booking.client?.lastName || ''}`.trim();
-      const feeInfo = cancellationFeeAmount > 0
-        ? ` (biaya pembatalan ${feePercent}%: Rp ${cancellationFeeAmount.toLocaleString('id-ID')}, refund: Rp ${refundAmount.toLocaleString('id-ID')})`
-        : '';
-      await this.notificationService.notifyAdmins(
-        'Refund Claim Baru',
-        `${clientName} membatalkan booking ${booking.id.substring(0, 8).toUpperCase()}${feeInfo}`,
-        'PAYMENT',
-        { claimId: claim.id, bookingId: booking.id, link: '/finance' },
+    if (booking.payment && createdClaim) {
+      const clientName =
+        `${booking.client?.firstName || ''} ${booking.client?.lastName || ''}`.trim();
+      const feeInfo =
+        cancellationFeeAmount > 0
+          ? ` (biaya pembatalan ${feePercent}%: Rp ${cancellationFeeAmount.toLocaleString('id-ID')}, refund: Rp ${refundAmount.toLocaleString('id-ID')})`
+          : '';
+      this.notificationService
+        .notifyAdmins(
+          'Refund Claim Baru',
+          `${clientName} membatalkan booking ${booking.id.substring(0, 8).toUpperCase()}${feeInfo}`,
+          'PAYMENT',
+          { claimId: createdClaim.id, bookingId: booking.id, link: '/finance' },
+        )
+        .catch(() => {});
+      this.logger.log(
+        `Booking ${bookingId} cancelled: fee=${feePercent}%, feeAmount=${cancellationFeeAmount}, refund=${refundAmount}`,
       );
-
-      this.logger.log(`Booking ${bookingId} cancelled: fee=${feePercent}%, feeAmount=${cancellationFeeAmount}, refund=${refundAmount}`);
     }
 
-    await this.notificationService.notifyBookingStatus(bookingId, 'CANCELLED');
+    this.notificationService.notifyBookingStatus(bookingId, 'CANCELLED').catch(() => {});
 
     return updated;
   }
@@ -581,7 +649,10 @@ export class BookingService {
   }
 
   async reschedule(userId: string, bookingId: string, dto: RescheduleBookingDto) {
-    const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { payment: { select: { status: true } } },
+    });
 
     if (!booking) throw new NotFoundException('Booking tidak ditemukan');
     if (booking.clientId !== userId && booking.escortId !== userId) {
@@ -589,6 +660,16 @@ export class BookingService {
     }
     if (!['PENDING', 'CONFIRMED'].includes(booking.status)) {
       throw new BadRequestException('Booking tidak dapat di-reschedule pada status ini');
+    }
+
+    // Guard: if the payment is already in escrow, do NOT silently reset the
+    // booking back to PENDING — that strands the money. Force the user to
+    // cancel + refund first (or we add an explicit reschedule-with-escrow
+    // flow later).
+    if (booking.payment && booking.payment.status === 'ESCROW') {
+      throw new BadRequestException(
+        'Booking sudah dibayar (ESCROW). Batalkan booking untuk refund, lalu buat booking baru.',
+      );
     }
 
     const startTime = new Date(dto.startTime);
@@ -606,57 +687,59 @@ export class BookingService {
       throw new BadRequestException('Minimum durasi booking adalah 3 jam');
     }
 
-    // Re-check availability (exclude current booking)
-    const overlap = await this.prisma.booking.findFirst({
-      where: {
-        escortId: booking.escortId,
-        id: { not: bookingId },
-        status: { in: ['PENDING', 'CONFIRMED', 'ONGOING'] },
-        OR: [{ startTime: { lt: endTime }, endTime: { gt: startTime } }],
-      },
-    });
-
-    if (overlap) {
-      throw new BadRequestException('Escort tidak tersedia pada waktu baru yang dipilih');
-    }
-
-    // Recalculate total if duration changed
     const escort = await this.prisma.user.findUnique({
       where: { id: booking.escortId },
       include: { escortProfile: true },
     });
-
     const hourlyRate = escort?.escortProfile?.hourlyRate;
     const totalAmount = hourlyRate
-      ? new Prisma.Decimal(hourlyRate.toNumber() * durationHours)
+      ? new Prisma.Decimal(hourlyRate as any).mul(new Prisma.Decimal(durationHours))
       : booking.totalAmount;
 
-    const updatedBooking = await this.prisma.booking.update({
-      where: { id: bookingId },
-      data: {
-        startTime,
-        endTime,
-        totalAmount,
-        status: 'PENDING', // Reset to pending for re-confirmation
-      },
-      include: {
-        client: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
-        escort: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
-      },
-    });
+    const rescheduleCommRate = await this.getCommissionRate();
 
-    // Sync payment record if amount changed
-    if (totalAmount.toNumber() !== booking.totalAmount.toNumber()) {
-      const rescheduleCommRate = await this.getCommissionRate();
-      const platformFee = new Prisma.Decimal(totalAmount.toNumber() * rescheduleCommRate);
-      const escortPayout = new Prisma.Decimal(totalAmount.toNumber() - platformFee.toNumber());
-      await this.prisma.payment.updateMany({
-        where: { bookingId, status: 'PENDING' },
-        data: { amount: totalAmount, platformFee, escortPayout },
+    return this.prisma.$transaction(async (tx) => {
+      await this.acquireEscortBookingLock(tx, booking.escortId);
+
+      const overlap = await tx.booking.findFirst({
+        where: {
+          escortId: booking.escortId,
+          id: { not: bookingId },
+          status: { in: ['PENDING', 'CONFIRMED', 'ONGOING'] },
+          OR: [{ startTime: { lt: endTime }, endTime: { gt: startTime } }],
+        },
+        select: { id: true },
       });
-    }
 
-    return updatedBooking;
+      if (overlap) {
+        throw new BadRequestException('Escort tidak tersedia pada waktu baru yang dipilih');
+      }
+
+      const next = await tx.booking.update({
+        where: { id: bookingId },
+        data: {
+          startTime,
+          endTime,
+          totalAmount,
+          status: 'PENDING',
+        },
+        include: {
+          client: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
+          escort: { select: { id: true, firstName: true, lastName: true, profilePhoto: true } },
+        },
+      });
+
+      if (totalAmount.toString() !== booking.totalAmount.toString()) {
+        const platformFee = totalAmount.mul(new Prisma.Decimal(rescheduleCommRate));
+        const escortPayout = totalAmount.sub(platformFee);
+        await tx.payment.updateMany({
+          where: { bookingId, status: 'PENDING' },
+          data: { amount: totalAmount, platformFee, escortPayout },
+        });
+      }
+
+      return next;
+    });
   }
 
   async addTip(clientId: string, bookingId: string, dto: TipBookingDto) {
@@ -679,20 +762,36 @@ export class BookingService {
       throw new BadRequestException('Anda sudah memberikan tip untuk booking ini');
     }
 
+    if (!(dto.amount > 0)) {
+      throw new BadRequestException('Nominal tip harus lebih dari 0');
+    }
+
     const tipAmount = new Prisma.Decimal(dto.amount);
 
-    const updatedPayment = await this.prisma.payment.update({
-      where: { id: booking.payment.id },
+    // Guard against double-submit races: only proceed if tipAmount is still
+    // NULL in the DB. `updateMany` with a narrower `where` plus a count check
+    // gives us a cheap optimistic concurrency guard without a raw SQL lock.
+    const result = await this.prisma.payment.updateMany({
+      where: { id: booking.payment.id, tipAmount: null },
       data: {
         tipAmount,
         escortPayout: booking.payment.escortPayout.add(tipAmount),
       },
     });
 
+    if (result.count === 0) {
+      throw new BadRequestException('Anda sudah memberikan tip untuk booking ini');
+    }
+
+    const updatedPayment = await this.prisma.payment.findUnique({
+      where: { id: booking.payment.id },
+      select: { tipAmount: true, escortPayout: true },
+    });
+
     return {
       message: 'Tip berhasil diberikan',
-      tipAmount: updatedPayment.tipAmount,
-      totalEscortPayout: updatedPayment.escortPayout,
+      tipAmount: updatedPayment?.tipAmount ?? tipAmount,
+      totalEscortPayout: updatedPayment?.escortPayout ?? booking.payment.escortPayout.add(tipAmount),
     };
   }
 
@@ -716,11 +815,11 @@ export class BookingService {
 
     const result = await this.prisma.booking.updateMany({
       where: {
-        id: { in: staleBookings.map(b => b.id) },
+        id: { in: staleBookings.map((b) => b.id) },
         status: 'PENDING',
       },
       data: {
-        status: 'CANCELLED',
+        status: 'EXPIRED',
         cancelledAt: new Date(),
         cancelReason: 'Otomatis dibatalkan — tidak direspon dalam 24 jam',
       },
@@ -728,10 +827,10 @@ export class BookingService {
 
     if (result.count > 0) {
       this.logger.log(`Auto-expired ${result.count} stale PENDING booking(s)`);
-
-      // Notify clients about expired bookings
       for (const booking of staleBookings) {
-        this.notificationService.notifyBookingStatus(booking.id, 'CANCELLED').catch(() => {});
+        this.notificationService
+          .notifyBookingStatus(booking.id, 'EXPIRED' as any)
+          .catch(() => {});
       }
     }
   }
@@ -757,11 +856,11 @@ export class BookingService {
 
     const result = await this.prisma.booking.updateMany({
       where: {
-        id: { in: unpaidBookings.map(b => b.id) },
+        id: { in: unpaidBookings.map((b) => b.id) },
         status: 'CONFIRMED',
       },
       data: {
-        status: 'CANCELLED',
+        status: 'EXPIRED',
         cancelledAt: new Date(),
         cancelReason: 'Otomatis dibatalkan — pembayaran tidak diterima dalam 72 jam',
       },
@@ -769,9 +868,10 @@ export class BookingService {
 
     if (result.count > 0) {
       this.logger.log(`Auto-expired ${result.count} unpaid CONFIRMED booking(s)`);
-
       for (const booking of unpaidBookings) {
-        this.notificationService.notifyBookingStatus(booking.id, 'CANCELLED').catch(() => {});
+        this.notificationService
+          .notifyBookingStatus(booking.id, 'EXPIRED' as any)
+          .catch(() => {});
       }
     }
   }
