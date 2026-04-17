@@ -9,8 +9,13 @@ export class EncryptionService {
   private readonly key: Buffer;
 
   constructor(private readonly config: ConfigService) {
-    const secret = this.config.get<string>('app.encryptionKey') || 'areton-default-encryption-key-change-me!';
-    // Derive a 32-byte key from the secret
+    const secret = this.config.get<string>('app.encryptionKey');
+    if (!secret) {
+      // `app.config.ts` already enforces this at boot, but we double-check to
+      // fail loudly rather than silently derive from a known default.
+      throw new Error('ENCRYPTION_KEY is not configured');
+    }
+    // Derive a 32-byte key from the secret via scrypt.
     this.key = scryptSync(secret, 'areton-salt-v1', 32);
   }
 
