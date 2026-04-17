@@ -2,7 +2,7 @@ import { Injectable, UnauthorizedException, ConflictException, NotFoundException
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
-import { randomBytes, createHmac } from 'crypto';
+import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import { PrismaService } from '@/config/prisma.service';
 import { RedisService } from '@/config/redis.service';
 import { AuditService } from '@/common/services/audit.service';
@@ -226,44 +226,74 @@ export class AuthService {
   }
 
   async forgotPassword(dto: ForgotPasswordDto) {
+    // Anti-enumeration: always return the same generic success message,
+    // regardless of whether the email exists. Attackers must not be able to
+    // distinguish registered vs. unregistered emails via this endpoint.
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
 
+    const isDev = this.config.get('app.nodeEnv') === 'development';
+    const genericResponse: { message: string; resetToken?: string } = {
+      message: 'Jika email terdaftar, tautan reset sudah dikirim.',
+    };
+
     if (!user) {
-      throw new NotFoundException('Email tidak terdaftar di sistem kami');
+      // Still audit the attempt for abuse monitoring, but do not reveal it.
+      await this.audit.log({
+        action: 'PASSWORD_RESET_REQUESTED_UNKNOWN_EMAIL',
+        resource: 'auth',
+        severity: 'WARN',
+        details: { email: dto.email },
+      });
+      return genericResponse;
     }
 
     // Generate reset token
     const resetToken = randomBytes(32).toString('hex');
 
-    // Store token in Redis with 1 hour expiry
+    // Store token in Redis with 1 hour expiry. We key on a SHA-256 hash of the
+    // token instead of the raw token so that a Redis snapshot leak does not
+    // directly reveal valid reset tokens.
+    const tokenKey = this.hashResetToken(resetToken);
     await this.redis.set(
-      `pwd_reset:${resetToken}`,
-      JSON.stringify({ userId: user.id, email: user.email }),
-      60 * 60, // 1 hour
+      `pwd_reset:${tokenKey}`,
+      JSON.stringify({ userId: user.id }),
+      60 * 60,
     );
 
-    // TODO: Send email via SendGrid/Nodemailer
     const frontendUrl = this.config.get('app.webUrl') || 'https://areton.id';
     const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
-    this.emailService.sendPasswordReset(user.email, {
-      name: user.firstName || 'User',
-      resetUrl,
-    }).catch((err) => {
-      this.logger.error(`Failed to send password reset email to ${user.email}: ${err?.message}`);
-    });
+    this.emailService
+      .sendPasswordReset(user.email, {
+        name: user.firstName || 'User',
+        resetUrl,
+      })
+      .catch((err) => {
+        this.logger.error(
+          `Failed to send password reset email to ${user.email}: ${err?.message}`,
+        );
+      });
 
-    return {
-      message: 'If the email exists, a reset link has been sent',
-      // Only include token in development for testing
-      ...(this.config.get('app.nodeEnv') === 'development' && { resetToken }),
-    };
+    if (isDev) {
+      // Only expose the token in dev for local QA.
+      genericResponse.resetToken = resetToken;
+    }
+
+    return genericResponse;
+  }
+
+  private hashResetToken(token: string): string {
+    // SHA-256 is enough here: the reset token has 256 bits of entropy
+    // (randomBytes(32)), so pre-image resistance is not an issue.
+    const { createHash } = require('crypto');
+    return createHash('sha256').update(token).digest('hex');
   }
 
   async resetPassword(dto: ResetPasswordDto) {
-    // Get token data from Redis
-    const tokenData = await this.redis.get(`pwd_reset:${dto.token}`);
+    // Token is stored hashed in Redis (see `forgotPassword`).
+    const tokenKey = this.hashResetToken(dto.token);
+    const tokenData = await this.redis.get(`pwd_reset:${tokenKey}`);
 
     if (!tokenData) {
       throw new BadRequestException('Invalid or expired reset token');
@@ -281,10 +311,21 @@ export class AuthService {
     });
 
     // Delete used token
-    await this.redis.del(`pwd_reset:${dto.token}`);
+    await this.redis.del(`pwd_reset:${tokenKey}`);
 
     // Invalidate all existing sessions by incrementing a version counter
-    await this.redis.set(`pwd_version:${userId}`, Date.now().toString(), 30 * 24 * 60 * 60);
+    await this.redis.set(
+      `pwd_version:${userId}`,
+      Date.now().toString(),
+      30 * 24 * 60 * 60,
+    );
+
+    await this.audit.log({
+      userId,
+      action: 'PASSWORD_RESET_COMPLETED',
+      resource: 'auth',
+      severity: 'INFO',
+    });
 
     return { message: 'Password has been reset successfully' };
   }
@@ -492,14 +533,24 @@ export class AuthService {
   }
 
   private verifyTOTP(secret: string, code: string): boolean {
-    // Support current window and ±1 window (30-sec step)
+    // Support current window and ±1 window (30-sec step). Comparison is done
+    // with constant-time equality to avoid leaking timing information about
+    // matching digits.
+    if (typeof code !== 'string' || code.length !== 6) return false;
     const now = Math.floor(Date.now() / 1000);
+    const codeBuf = Buffer.from(code, 'utf8');
+    let matched = false;
     for (let i = -1; i <= 1; i++) {
       const counter = Math.floor((now + i * 30) / 30);
       const generated = this.generateTOTPCode(secret, counter);
-      if (generated === code) return true;
+      const genBuf = Buffer.from(generated, 'utf8');
+      if (genBuf.length === codeBuf.length && timingSafeEqual(genBuf, codeBuf)) {
+        matched = true;
+        // Do not early-return — keep loop iterations constant to avoid a
+        // coarse timing signal about which window matched.
+      }
     }
-    return false;
+    return matched;
   }
 
   private generateTOTPCode(secret: string, counter: number): string {

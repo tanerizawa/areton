@@ -60,6 +60,8 @@ export class AuthController {
   }
 
   @Post('refresh')
+  // Limit refresh attempts — a genuine client rotates at most every ~15 min.
+  @Throttle({ medium: { ttl: 60000, limit: 20 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'New access token issued' })
@@ -77,7 +79,9 @@ export class AuthController {
   }
 
   @Post('forgot-password')
-  @Throttle({ short: { ttl: 60000, limit: 3 } })
+  // 3 requests/hour is sufficient to prevent email-bombing while still
+  // allowing legitimate retries across devices.
+  @Throttle({ long: { ttl: 60 * 60 * 1000, limit: 3 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Request password reset email' })
   @ApiResponse({ status: 200, description: 'Reset email sent (if account exists)' })
@@ -97,6 +101,7 @@ export class AuthController {
   }
 
   @Post('verify-email')
+  @Throttle({ medium: { ttl: 60000, limit: 10 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Verify email with token or code' })
   @ApiResponse({ status: 200, description: 'Email verified successfully' })
@@ -145,6 +150,8 @@ export class AuthController {
   }
 
   @Post('2fa/verify')
+  // Guard the 2FA window against brute-forcing the 6-digit code.
+  @Throttle({ short: { ttl: 60000, limit: 5 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Verify 2FA code during login' })
   @ApiResponse({ status: 200, description: '2FA verified — tokens returned' })
@@ -277,6 +284,7 @@ export class AuthController {
   // ── Apple Sign-in ────────────────────────────────────
 
   @Post('apple')
+  @Throttle({ short: { ttl: 60000, limit: 10 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login/Register with Apple Sign-in' })
   @ApiResponse({ status: 200, description: 'Login successful — tokens returned' })
