@@ -58,6 +58,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
       }
     }
 
+    const correlationId =
+      (request as any).correlationId ||
+      request.get('x-correlation-id') ||
+      request.get('x-request-id');
+
     const errorResponse = {
       success: false,
       statusCode: status,
@@ -65,6 +70,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       errors,
       timestamp: new Date().toISOString(),
       path: request.url,
+      correlationId,
     };
 
     response.status(status).json(errorResponse);
